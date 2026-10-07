@@ -6,7 +6,8 @@
 //
 // ## 来历
 //
-// 从上游脚本 shortx-Fluid_Cloud_Island（v3.2.3）移植而来，**一次性**做了 5 类改动：
+// 从上游 `reference/core.js`（v3.2.3，逐字节镜像）移植而来，
+// **一次性**做了 5 类改动：
 //
 //   1. 删 3 行 `importClass(Packages.tornaco.apps.shortx...)`（原平台的 protobuf 类）
 //   2. `showToast`  → `VFLOW_ADAPTER.toast`        → vflow.device.toast
@@ -14,8 +15,9 @@
 //   4. shell 调用   → `VFLOW_ADAPTER.shell`        → vflow.shizuku.shell_command
 //   5. 9 处配置路径 → `FLUID_CLOUD_DIR`（/sdcard/vFlow/fluid-cloud）
 //
-// 改动点是**就地标注**的（搜 `[vflow]` 可见）。原始上游版本留了一份只读参考：
-// `reference/upstream-core-3.2.3.js`。
+// 改动点是**就地标注**的（搜 `[vflow]` 可见）。
+//
+// **要对照原始实现**：`reference/core.js`（**同名文件，直接 diff**，不用做名字映射）。
 //
 // ⚠️ **本项目不再跟随上游更新** —— 只维护这一份。
 //    上游后续版本若带来需要的功能，**手工挑拣**过来，不做自动同步。

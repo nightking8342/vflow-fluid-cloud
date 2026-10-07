@@ -1,0 +1,9 @@
+{
+    "name": "酷安",
+    "clearClipboard": true,
+    "tigger": [
+      "coolapk\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.coolapk.market"
+}

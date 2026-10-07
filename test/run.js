@@ -405,12 +405,53 @@ console.log('\n[8] 项目结构（架构调整后的不变量）');
 //    或者让 version 与 package.json 漂开，功能照常工作、产物照常跑。
 //    ⇒ 只能在这里钉住。
 
-test('reference/ 存在且含上游参考（架构调整后是「来历记录」，不是同步基线）', () => {
+test('reference/ 是完整的上游镜像，且保持上游原名', () => {
     const dir = path.join(ROOT, 'reference');
     assert(fs.existsSync(dir), '缺少 reference/ —— 上游来历记录丢了');
-    assert(fs.existsSync(path.join(dir, 'upstream-core-3.2.3.js')), '缺少上游 core 参考');
-    const ver = fs.readFileSync(path.join(dir, 'upstream-version.txt'), 'utf8').trim();
-    assertEq(ver, '3.2.3', '上游版本记录不对');
+
+    // ⚠️ **文件名必须与上游一致**（不带 `upstream-` 前缀、不带版本号）——
+    //    加了前缀就做了「名字映射」，想对照改动时得先在脑子里过一遍
+    //    「src/core.js 对应 reference/ 的哪个文件」。目录本身已经说明了这是上游的。
+    for (const f of ['core.js', 'onOpen.js', 'update.js', 'version']) {
+        assert(fs.existsSync(path.join(dir, f)), `reference/ 缺 ${f}（文件名应与上游一致）`);
+    }
+    assert(fs.existsSync(path.join(dir, 'rules')), 'reference/ 缺 rules/');
+    assert(fs.existsSync(path.join(dir, 'nolinkrules')), 'reference/ 缺 nolinkrules/');
+
+    // ⚠️ **反向锁**：带前缀的旧命名不该复活
+    for (const bad of ['upstream-core-3.2.3.js', 'upstream-version.txt']) {
+        assert(!fs.existsSync(path.join(dir, bad)), `reference/ 不该有 ${bad}（旧命名）`);
+    }
+
+    assertEq(fs.readFileSync(path.join(dir, 'version'), 'utf8').trim(), '3.2.3', '上游版本不对');
+});
+
+test('reference/ 是完整镜像（未移植的文件也留着，它们是对照基线）', () => {
+    // ⚠️ 存在理由：`onOpen.js` / `update.js` **都没移植**，很容易被当成
+    //    「没用的素材」删掉。但它们的用途**不是**「将来要用」，而是**对照基线** ——
+    //    判断「某个功能上游有没有」时不必回去翻另一个仓库。
+    const dir = path.join(ROOT, 'reference');
+    const onOpen = fs.readFileSync(path.join(dir, 'onOpen.js'), 'utf8');
+    const update = fs.readFileSync(path.join(dir, 'update.js'), 'utf8');
+    assert(onOpen.length > 5000, `onOpen.js 太小（${onOpen.length}）—— 是不是被清空了？`);
+    assert(update.length > 20000, `update.js 太小（${update.length}）—— 是不是被清空了？`);
+
+    // 与 src/ 的对应关系：core.js 是移植过的，onOpen/update 没有
+    assert(fs.existsSync(path.join(ROOT, 'src', 'core.js')), 'src/core.js 应在（core.js 已移植）');
+    assert(!fs.existsSync(path.join(ROOT, 'src', 'onOpen.js')), 'src/ 不该有 onOpen.js（未移植）');
+    assert(!fs.existsSync(path.join(ROOT, 'src', 'update.js')), 'src/ 不该有 update.js（未移植）');
+
+    // 镜像必须逐字节一致（抽两个文件核，全量 diff 太重）
+    const sameAs = (rel) => {
+        const a = fs.readFileSync(path.join(dir, rel), 'utf8').replace(/\r\n/g, '\n');
+        const b = fs.readFileSync(path.join(ROOT, 'src', rel), 'utf8').replace(/\r\n/g, '\n');
+        return a === b;
+    };
+    // ⚠️ rules 逐字节相同 = 「规则库没改过」。改过规则就会红 —— 那时应把
+    //    这条断言改成「与镜像的差异是有意的」，而**不是**去改 reference/。
+    const ruleFiles = fs.readdirSync(path.join(dir, 'rules'));
+    assert(ruleFiles.length === 27, `reference/rules 应有 27 条，实际 ${ruleFiles.length}`);
+    assert(sameAs(path.join('rules', ruleFiles[0])), `规则 ${ruleFiles[0]} 与镜像不一致 —— 规则库被改过？`);
 });
 
 test('vendor/ 与 src/build.js 已随架构调整删除', () => {

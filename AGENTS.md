@@ -13,7 +13,7 @@ This file provides guidance to coding agents when working with code in this repo
 产出物是一段 JavaScript（跑在 vFlow 的「JavaScript脚本」模块里）+ 一份规则库。
 
 **素材来源**：上游脚本 [nightking8342/shortx-Fluid_Cloud_Island](https://github.com/nightking8342/shortx-Fluid_Cloud_Island)
-（原为 ShortX 写的，`version` = `3.2.3`）。`reference/` 是它的**只读参考**。
+（原为 ShortX 写的，`version` = `3.2.3`）。`reference/` 是它的**逐字节镜像**。
 
 ---
 
@@ -42,6 +42,25 @@ This file provides guidance to coding agents when working with code in this repo
 
 ⚠️ **`reference/` 里的东西一律不改** —— 改了它就失去「能对照原始实现」这个用途。
 它**不进构建**，改了也不影响产物（正因为不进构建，改错也不会当场暴露 ⇒ 所以更不该改）。
+
+### `reference/` 是**完整镜像**，文件**保持上游原名**
+
+⚠️ 这有两个刻意的决定，都别改回去：
+
+| 决定 | 理由 |
+|---|---|
+| **文件名与上游一致**（`core.js` / `onOpen.js` / `update.js` / `version`） | 目录本身已经说明了「这是上游的」。再加前缀（`upstream-core-3.2.3.js` 之类）① 是**冗余**；② 更糟的是**做了名字映射** ⇒ 想对照「我们改了什么」时得先在脑子里过一遍「`src/core.js` 对应 `reference/` 的哪个文件」 |
+| **完整，不筛**（`onOpen.js` / `update.js` 虽然**没移植**也留着） | 它**不是**「将来要用的素材」，是**对照基线**。筛掉的话，判断「某个功能上游有没有」就得回去翻另一个仓库 |
+
+**要对照「我们改了什么」**：
+
+```bash
+diff reference/core.js src/core.js        # 5 类移植改动 + 之后所有就地修改
+diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没改过规则）
+```
+
+⚠️ `reference/` 里**没有 `.git`**（那是上游仓库的工作区），`README.md` 是本项目加的
+（说明哪些移植了、哪些没有、为什么）。**除 `README.md` 外，其余文件逐字节等于上游。**
 
 📖 完整对照见 `docs/DESIGN.md` §3.5。
 
@@ -80,9 +99,14 @@ This file provides guidance to coding agents when working with code in this repo
 ```
 ├── version               # 本项目版本号（与设备上那份对比用，见 docs/DESIGN.md §3.4.4）
 ├── docs/DESIGN.md        # ⭐ 设计与可行性分析（含真机验证记录、踩坑、未决项）
-├── reference/            # 上游素材**只读参考**（不进构建，勿改）
-│   ├── upstream-core-3.2.3.js   #   上游核心 2810 行（一次性移植的来源）
-│   └── upstream-version.txt     #   `3.2.3`
+├── reference/            # 上游素材**完整镜像**（只读，不进构建，勿改）
+│   ├── README.md         #   ⚠️ 本文件是**本项目加的**（说明哪些移植了、为什么）
+│   ├── core.js           #   上游核心 2810 行 ⇒ 已移植到 src/core.js
+│   ├── rules/            #   27 条有链接规则 ⇒ 已移植到 src/rules/
+│   ├── nolinkrules/      #   2 条无链接规则 ⇒ 已移植到 src/nolinkrules/
+│   ├── onOpen.js         #   223 行，指令启用时执行 ⇒ **未移植**（无对应时机）
+│   ├── update.js         #   647 行，远程更新 ⇒ **未移植**（被 §3.4 那套取代）
+│   └── version           #   `3.2.3`（⚠️ 与根目录的 version **不是一回事**）
 ├── src/                  # ✍️ 手写（我们维护的就是这些）
 │   ├── adapter.js        #   平台桥 VFLOW_ADAPTER + 全局变量 + 首次自举
 │   ├── core.js           #   ★ 核心逻辑（从上游移植后**就地维护**，直接改）
