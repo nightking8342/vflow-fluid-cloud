@@ -2,7 +2,8 @@
 
 > **项目**：`vFlow 流体云` —— 把「复制 / 打开分享链接 → 识别 → 超级岛提示 → 全屏或小窗打开」
 > 这条链路做成 vFlow 工作流。
-> **状态**：**P0 已跑通**（浮窗形态，真机验证通过）；**超级岛形态被一处 vFlow 配置缺失阻塞**（§4.6，**已定位真因，可解**）。
+> **状态**：**P0 已跑通，超级岛形态也已打通**（2026-10-08，走 §4.6 出路 ①：脚本只发广播、
+> 由工作流的广播触发器接；点按钮 → 小窗打开，真机验证通过）。**不再有阻塞项。**
 > **代码位置**：`D:/develop/myProjects/vflow-fluid-cloud`（**独立仓库**，分支 `main`；不再是 vFlow 的 worktree）。
 > **脚本来源**：`D:/develop/myProjects/shortx-Fluid_Cloud_Island`（本地克隆，分支 `vflow`，**未做任何改动**；
 > `version` = `3.2.3`，`core.js` 2810 行 / `onOpen.js` 223 行 / `update.js` 647 行）。
@@ -16,9 +17,13 @@
 > - §3.4 —— **脚本更新机制**（拉产物 / 不走代理 / 覆盖 + 版本号对比）。**已定案，未实现**
 > - §4.6 —— ⚠️ **头号阻塞项**：`vflow.system.js` 里不能 `new` 抽象类。
 >   真因是 **vFlow 少覆写了 `ContextFactory.createClassLoader`**（不是 ART 的限制），
->   含实测矩阵、与 ShortX 的逐层对照、四条出路
+>   含实测矩阵、与 ShortX 的逐层对照、四条出路。⚠️ **已解**（出路 ①）
+> - §4.2 —— 小窗打开。⚠️ **本节初稿结论被推翻**（以为 `ActivityOptions` 不可用，实测可用）
 > - §7.1 —— P0 真机验证记录（7 项通过 / 1 项阻塞 / 4 条既有行为）
 > - §7.2 —— 为什么用「引导脚本 + adb push」（远程 API 的 24 KB 上限）
+> - ⚠️ **一处架构变更**：曾经是**两个**工作流（「流体云」+「流体云·点击」），
+>   2026-10-08 用户指出「既然用的都是一个脚本，其实不用分成两个工作流」
+>   ⇒ **合并成一个工作流挂两个触发器**。见 `tools/install-workflows.py` 文件头
 
 ---
 
@@ -92,6 +97,7 @@
 【第四层】打开方式
   ├─ 全屏：startActivityAsUser
   └─ 小窗：ActivityOptions.setLaunchWindowingMode + setLaunchBounds
+         ⚠️ 这一层**完全不碰 shell** —— 三行都是普通 Java 调用（§4.2 已实证可用）
 ```
 
 **关键事实**：五条触发源在分派后**收敛成同一个入口**（`replaceResult` → `core.js`）。
@@ -140,12 +146,12 @@
 |---|---|---|---|
 | 写剪贴板 | `vflow.system.set_clipboard` | ✅ 有 | `SetClipboardModule.kt:30`（另有 Core 版 `vflow.core.set_clipboard`） |
 | 读剪贴板 | `vflow.system.get_clipboard` | ✅ 有 | `GetClipboardModule.kt:26` |
-| 执行 shell | `vflow.shizuku.shell_command` | ✅ 有 | 脚本里 `executeAction(ShellCommand)` 共 **2 处**（`core.js:2569` 等） |
+| 执行 shell | `vflow.shizuku.shell_command` | ✅ 有 | 脚本里 `executeAction(ShellCommand)` **只有 1 处**（`core.js:2569`，「系统选择框」分支的 `am start -d <url>`；`ShellCommand` 这个名字在文件里出现 2 次，另一次是 `importClass`） |
 | Toast | `vflow.device.toast` | ✅ 有 | `ToastModule.kt:21` |
 | 启动 App / 打开链接 | `vflow.system.launch_app` / HTTP 模块等 | ✅ 有 | `LaunchAppModule.kt:25` |
 | **正则替换** | 无 | ❌ **没有** | `TextReplaceModule` 是**字面量**替换；`TextProcessingModule` 的 `regex_extract` **只提取不替换** ⇒ 见 §4.3 |
 | **超级岛通知** | 岛装配层存在，**但无工作流模块** | ⚠️ **部分** | `IslandNotificationDispatcher.dispatch` 的**生产调用点只有 2 处**，都在 `ExecutionNotificationManager.kt:399/451`（执行进度通知）⇒ 见 §4.1 |
-| **小窗** | 无模块 | ❌ **没有**，但有**已验证的绕过路径** | 见 §4.2 |
+| **小窗** | 无模块 | ✅ **不需要模块** | 上游原样的 `ActivityOptions` **在 JS 里直接可用**（§4.2，2026-10-08 真机实证，**推翻了初稿的「做不到」**） |
 
 ### 2.3 脚本层对照
 
@@ -179,6 +185,10 @@
 | `core.js:2569` | `shortx.executeAction(ShellCommand…)` | `vflow.shizuku.shell_command({ mode: 'auto', command: … })` |
 
 外加 3 行 import（`core.js:23/24/31`，`Packages.tornaco.apps.shortx.core.proto.action.*`）**整行删除**。
+
+> ⚠️ **这三处是「平台专有 API」的全部**，其中**只有 `core.js:2569` 是 shell**
+> （「系统选择框」那个对话框分支的 `am start -d <url>`，见 §4.4 的对话框选项）。
+> **小窗打开不在其中** —— 它走 `ActivityOptions`（普通 Java API），本来就不需要替代（§4.2）。
 
 > ✅ **结论**：脚本与原平台的耦合**极浅**。2000 多行核心逻辑（规则匹配、UI 构建、岛参数）
 > **全是公开 Android API + 纯 JS**，无需改动。
@@ -434,7 +444,17 @@ NotificationManager.notify(notificationId, notification);         // 公开 API
 `actions[0].actionTitle` 一个按钮）。**两者是同一协议的不同业务形态**，
 ⇒ 做 B 之前要先确认 `IslandParamsBuilder` 能否表达脚本那种形状（**未核实，列为未决项**）。
 
-### 4.2 缺口 2：小窗打开（**vFlow 已有可行路径**）
+### 4.2 缺口 2：小窗打开 —— ⚠️ **本节初稿的结论是错的，已推翻**
+
+> ⚠️⚠️ **2026-10-08 更正。** 本节初稿写「vFlow 侧**不能照抄** `ActivityOptions`，
+> 因为是 `@hide` API、App 进程受限，只能走 `service call … 138`」。
+> **真机实测证明那个结论是错的** —— 上游那三行在 vFlow 的 JS 里**逐字跑得通**，
+> 且产出**精确 bounds 的 freeform task**。
+>
+> **错在哪**：把「公开 SDK 里没有这个方法」当成了「运行时调用不了」。
+> `ActivityOptions` 里 `javap` 确实查不到 `setLaunchWindowingMode`（公开 API 清单里 0 命中），
+> 但**隐藏 API 限制在真机上并没有拦住它**（见下）。初稿**没有做实验就下了结论**，
+> 而且这个结论**一路传给了 P1 计划、未决项、静默失效点清单**（都已一并更正）。
 
 **原脚本做法**（`core.js:1704-1790`，【源码直读】）：直接构造 `ActivityOptions`：
 
@@ -445,35 +465,58 @@ options.setLaunchBounds(new Rect(left, top, right, bottom));
 context.startActivityAsUser(intent, options.toBundle(), userHandle);
 ```
 
-**vFlow 侧为什么不能照抄**：`setLaunchWindowingMode` / `setLaunchBounds` 是 **`@hide` API**，
-App 进程（UID 10684）受限；且 `ActivityOptions` 需要构造 `Rect` 对象参数，
-**shell 的 `service call` 传不了对象**（`script-system-overview.md:334-357`）。
+#### ⭐ 2026-10-08 真机实测：**这三行在 vFlow 里可用**（推翻了初稿结论）
 
-**已验证的绕过路径**（`script-system-overview.md:408-455`，**已实测**）：
+探针（`vflow.system.js`，小米 MIX Fold 3 / Android 17 / vFlow 1.5.4）：
 
-```bash
-TID=$(dumpsys activity activities | grep -m1 'topResumedActivity' | grep -oE ' t[0-9]+' | tr -d ' t')
-service call activity_task 138 i32 $TID i32 $flag s16 '' i32 0
-# 138 = launchMiniFreeFormWindowVersion2 的事务码（MIUI 私有 AIDL）
+| # | 探测 | 结果 |
+|---|---|---|
+| 1 | `android.app.ActivityOptions` 类可见 | ✅ |
+| 2 | `makeBasic()` + `setLaunchWindowingMode(5)` | ✅ 无异常 |
+| 3 | `makeBasic()` + `setLaunchBounds(new Rect(...))` | ✅ 无异常（**能构造对象**） |
+| 4 | `ctx.startActivityAsUser(intent, options.toBundle(), UserHandle.of(0))` | ✅ 无异常 |
+| 5 | `logcat` 里的隐藏 API 告警（`Accessing hidden …`） | **0 条**（清空 buffer 后跑，全文搜 `Accessing hidden` 计数 = 0） |
+| 6 | ⭐ **回读 `dumpsys activity activities`** | **`mode=freeform` + `mBounds=Rect(0, 0 - 900, 1300)`**（与探针传的 bounds **逐值一致**） |
+
+第 6 项是**决定性证据**。它是这样取到的：探针请求启动 `me.ele`，而 MIUI 的后台启动拦截
+弹了个确认框顶替它，`dumpsys` 里留下：
+
+```
+Task{24a1985 #1015221 ... mode=freeform ...}
+  mBounds=Rect(0, 0 - 900, 1300)                                  ← 正是 setLaunchBounds 的值
+  launchedFromUid=10698 launchedFromPackage=com.chaomixian.vflow  ← 正是 vFlow
+  Intent { act=android.app.action.CHECK_ALLOW_START_ACTIVITY ... }
 ```
 
-```javascript
-var r = vflow.shizuku.shell_command({ mode: 'auto', command: cmd });
-```
+⇒ **那个对话框自己就是以 freeform + 精确 bounds 起来的**，而它是被 vFlow 的
+`startActivityAsUser(options)` 拉起来的。**`setLaunchWindowingMode` 与 `setLaunchBounds`
+两处都真的生效了。**
 
-⚠️ **诚实标注的代价**（同文档 §6.2）：
-- **事务码 `138` 硬编码**：系统升级可能变（失效时由 `mode=freeform` 回读报 FAIL，**不会静默**）
-- 依赖 `dumpsys` 输出格式
-- 依赖 Shizuku / Root
-- `launchMiniFreeFormWindowVersion2` 是 **MIUI / 澎湃私有接口**（本项目的目标机型恰好是）
+**为什么没被隐藏 API 拦**（如实记录，**机制未完全定论**）：本机
+`settings get global hidden_api_policy` = `1`、vFlow 的 `hiddenApiEnforcementPolicy=2`
+（MIUI 的 `PolicyMaker` 对 vFlow 打的是 `NO_RESTRICT_APP`）⇒ **这台设备本来就放宽了**。
+⚠️ 所以**不能把「实测通过」推广成「所有设备都通过」** —— 换机型/换 ROM 需重跑上表。
+但**可以确定的是**：初稿那句「vFlow 侧不能照抄」**在本项目的目标机型上不成立**。
 
-⇒ **小窗可用，但只有「目标机型是小米 + 装了 Shizuku」这一条路**。
-非小米机型应**降级为全屏**（原脚本已有类似判断，`core.js:1765`）。
+**与 `service call … 138` 的关系**（那条路**同样有效**，不是错的，只是**不必需**）：
 
-#### ⭐ 2026-10-07 补：`am start --windowingMode` **也能开小窗**（已真机实测）
+| | `ActivityOptions`（**上游原样**） | `service call activity_task 138` |
+|---|---|---|
+| 作用 | **新开**一个 freeform task，**自带 bounds** | 把**已有** task 变 freeform |
+| 需要 | 无（普通 JS） | Shizuku / Root + `dumpsys` 解析 |
+| 机型 | ⚠️ 取决于隐藏 API 策略（本机通过） | ⚠️ `138` 是 MIUI 私有事务码 |
+| 现状 | ✅ **本项目就用这条**（`src/core.js` 未改动，上游原样） | 未使用 |
 
-上面那条是**让已有 task 变 freeform**（`launchMiniFreeFormWindowVersion2`）；
-**开新 task 时直接指定窗口模式**还有另一条路 —— `am start` 自带的参数：
+⇒ **结论更正**：小窗**不需要** shell，也**不需要**绕道 —— 上游那三行原样可用。
+**本节涉及的「P1 第 9 项：小窗打开」实际是 P0 就已具备的能力**（见 §5 实施计划）。
+
+#### （已降级为备选）`am start --windowingMode` 也能开小窗（2026-10-07 实测）
+
+> ⚠️ **这条现在只是备选** —— 上面那节已证明**上游原样的 `ActivityOptions` 就能用**，
+> 不需要 shell。本小节保留是因为它是**一条独立的实证**（`--windowingMode` 确实产出
+> `mode=freeform`），且若将来某机型真的拦隐藏 API，它是现成的退路。
+
+**开新 task 时直接指定窗口模式** —— `am start` 自带的参数：
 
 ```bash
 am start --windowingMode 5 -a android.intent.action.VIEW -d "<url>"
@@ -493,17 +536,18 @@ am start --windowingMode 5 -a android.intent.action.VIEW -d "<url>"
 **但「打开哪个 App 的哪个页面」仍需 `-p` 或 `-n` 给对** —— 而这正是
 `core.js` 的 `matchRules` 已经在算的东西（它产出 `pkg` / `activity`）。
 
-**两条路的关系**：
+**三条路的关系**：
 
-| | `service call … 138`（§4.2 原文） | `am start --windowingMode 5`（本条） |
-|---|---|---|
-| 作用 | 把**已有** task 变 freeform | **新开**一个 freeform task |
-| 需要 | `dumpsys` 取 taskId + **私有事务码** | 只要包名/component |
-| 机型 | ⚠️ **小米私有** | ⚠️ **未验**（`--windowingMode` 是 AOSP 的 shell 命令参数，但各 ROM 是否放行未测） |
-| 全屏 | 不适用 | 同一条命令把 `5` 换成 `1` |
+| | ⭐ `ActivityOptions`（**本项目在用**） | `am start --windowingMode 5` | `service call … 138` |
+|---|---|---|---|
+| 作用 | 新开 freeform task，**自带 bounds** | 新开 freeform task | 把**已有** task 变 freeform |
+| 需要 | 无（普通 JS） | 包名/component + shell | `dumpsys` 取 taskId + **私有事务码** |
+| 机型 | ⚠️ 取决于隐藏 API 策略（本机通过） | ⚠️ **未验** | ⚠️ **小米私有** |
+| 全屏 | 同一个 `ActivityOptions` 把 `5` 换成 `1` | 同一条命令把 `5` 换成 `1` | 不适用 |
 
-⚠️ **倾向新路**（命令更短、不依赖私有事务码），但**机型覆盖只有一台设备的数据**
-⇒ **不得当成「通用可行」引用**，跨机型需按 §4.2 那套回读验证再确认。
+⚠️ **两条 shell 路都只是备选**（`ActivityOptions` 那条已实证可用，见本节开头），
+且**机型覆盖都只有一台设备的数据** ⇒ **不得当成「通用可行」引用**，
+跨机型需按 §4.2 那套回读验证再确认。
 
 ### 4.3 缺口 3：正则替换（**一行可补，建议补**）
 
@@ -751,8 +795,8 @@ public Class<?> defineClass(String name, byte[] data) {
 | # | 改动 | 说明 |
 |---|---|---|
 | 1 | **删掉 `new BroadcastReceiver`**（`core.js:1863`）与 `registerReceiver` | 整段消失 —— 这正是撞墙的地方 |
-| 2 | **删掉 `while (result === null) { Thread.sleep(150); }` 那几处**（`core.js:1976`（岛）/ `:799`（浮窗）/ `:942`（对话框）） | 不再等回传 ⇒ **不再阻塞** |
-| 3 | 两条 `PendingIntent` 都改成**固定 action + 带 `data` 载荷** | `data` 里装「打开哪个链接 / 全屏还是小窗」。⚠️ **`requestCode` 主体用 `notificationId`、按钮用 `+1`**（契约 C） |
+| 2 | **删掉岛路径的 `while (result === null) { Thread.sleep(150); }`**（`core.js:1976`） | 不再等回传 ⇒ **不再阻塞**。⚠️ **只删岛这一处** —— 浮窗（`:799`）与对话框（`:942`）那两处**走的是接口 `View.OnClickListener`，本来就不撞墙**，留着 |
+| 3 | **只把【按钮】那条 `PendingIntent` 改成固定 action + 带 `data` 载荷** | ⚠️⚠️ **主体那条不动**（它是 `getActivity`，系统直接拉起，**没被阻塞**）。见下方「改动范围」。⚠️ **`requestCode` 主体用 `notificationId`、按钮用 `+1`**（契约 C） |
 | 4 | **清理「超时线程」那一段**（`core.js:1961`） | ⚠️ **容易漏**：它也在 `result` / `unregisterReceiver` 上（`if (result === null)` + `receiverRef.get()`）。receiver 删了之后，这两句的语义全没了 —— 见下 |
 
 ⚠️ **第 4 条不是「顺手清理」，漏了会静默出问题**：那段线程在 `timeout` 之后
@@ -765,24 +809,70 @@ public Class<?> defineClass(String name, byte[] data) {
 （`core.js:1961`，实测矩阵第 6/7 条）。**别指望它能用** ——
 若决定保留超时收岛，先确认它在真机上真的会跑。
 
-##### ✅ 实施状态（2026-10-07）：**已改完，未上真机**
+##### ✅ 实施状态（2026-10-08）：**脚本 + 工作流都已就位，真机验证通过**
 
-脚本侧（`src/core.js`）已按本方案改完，改动集中在四处：
+> ⚠️⚠️ **改动范围：只动「被 vFlow 阻塞」的地方。** 用户 2026-10-08 明确纠正过一次 ——
+> 我第一版把**主体那条 PendingIntent 也一起改成广播**了，那是**过度改动**。
+> 判据是「这行在 vFlow 里跑不跑得起来」，不是「看起来像不像同一类东西」。
+
+**上游那个函数里有两条 PendingIntent，只有一条被阻塞**：
+
+| 通道 | 上游写法 | 谁接 | 被 vFlow 阻塞？ | 本次改动 |
+|---|---|---|---|---|
+| **主体**（点通知 / 点岛本体） | `getActivity(createLaunchIntent(...))` | **系统**直接拉起 Activity | ❌ **不阻塞**（脚本完全不参与） | **不动**（上游原样） |
+| **按钮**（岛上的「浮窗打开」） | `getBroadcast(ACTION_CLICK_BUTTON)` → **脚本自己 `registerReceiver` 的 receiver** | 脚本 | ✅ **被阻塞**（`new BroadcastReceiver` 必然抛，§4.6） | **改走工作流广播** |
+
+脚本侧（`src/core.js`）改动集中在四处：
 
 | 位置 | 改动 |
 |---|---|
 | 文件顶部新增注释块 | 说明为什么改、只覆盖哪类场景（A 类） |
 | 新增 `buildClickPayload` / `createClickBroadcastIntent` | 载荷编码 + PendingIntent 构造（在 `createLaunchIntent` 之前） |
-| `showIslandNotification` | 删掉 receiver 段与等待循环；两条 PendingIntent 改成广播；`return "已发送"` |
+| `showIslandNotification` | 删掉 receiver 段与等待循环；**按钮那条**改成广播；`return "已发送"` |
 | `showFloatingPrompt` | 加 `opts.openWith` 分流（没有 openWith 的走浮窗 —— 见「A/B 两类」） |
 
-⚠️ **`VFLOW_CLICK_BROADCAST`（`src/core.js` 顶部）是回退开关**，默认 `true`。
-置 `false` 时退回旧行为（主体 `getActivity`、按钮仍走广播但没人接）——
-它是**排查用的**，不是长期配置项。
+⚠️ **上游另有一条「主体也走广播」的分支**（`pull_small_window == false` 时
+`getBroadcast(ACTION_CLICK_MAIN)` → 脚本 receiver）。它**同样被阻塞**，也已改走工作流，
+但**当前配置下不可达** —— `var pull_small_window = config.pull_small_window || true`
+**恒为真**（`||` 是「假值才取右边」，不是「缺失才兜底」；用户 2026-10-08 指出）。
+⚠️ 这是上游的一个真 bug，但**本次不动它** —— 它不阻塞任何东西，改它超出「只修被阻塞处」的范围。
 
-⚠️ **配套的工作流改动（加广播触发器 + 处理步骤）尚未做** ——
-脚本现在发出去的广播**还没有人接**。⇒ 在配上触发器之前，**点岛不会有任何反应**
-（这是**预期的**，不是缺陷）。
+工作流侧由 `tools/install-workflows.py` 建 —— ⭐ **一个工作流、两个触发器**（**已建好**）：
+
+| 工作流 | 触发器 | `inputs`（键 → 值） |
+|---|---|---|
+| **流体云**（唯一一个） | ① `vflow.trigger.clipboard`（标签 `剪切板`）<br>② `vflow.trigger.broadcast`（action `…fluidcloud.CLICK`、scheme `vflowfc`、标签 `点击`） | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `[[__trigger_label]]` |
+
+⚠️ **曾经是两个工作流**（「流体云」+「流体云·点击」）。用户 2026-10-08 指出
+「既然用的都是一个脚本，其实不用分成两个工作流」⇒ **合并成一个**。
+合并的收益：改 `bootstrap.js` 只需刷**一处**，不存在「只更新了其中一个、两边不一致且不报错」。
+（`install-workflows.py` 会**自动删掉**遗留的「流体云·点击」—— 不删的话两个工作流都监听同一个广播，
+一次点击跑两遍，第二遍撞 `block_new` 被忽略，**看起来像随机不触发**。）
+
+##### ⚠️⚠️ 合并成一个工作流带来的新坑：未命中的触发器输出是 `{{{...}}}`
+
+**这是本次合并最容易漏的一条**（已实测确认，不是推断）：
+
+vFlow 的 `VariableResolver` 对**解析不到**的引用**不回退成空串**，而是回退成
+**字面量 `{{{stepId.outputId}}}`（三个花括号）** ——
+`VariableResolver.kt:133` 的 `VObjectFactory.from("{${segment.rawExpression}}")`，
+而 `rawExpression` 本身已含 `{{ }}`。
+
+⇒ **一次执行里必然有一路是 `{{{...}}}`**（另一路的触发器没命中）。
+不处理的话，脚本会拿这串去识别链接 ⇒ **弹一个无意义的岛，而且不报错**。
+
+**处置**：`src/adapter.js` 的 `input` 里显式认出来（`v.indexOf("{{{") === 0`）当空处理，
+并按「点击 URI 优先、剪贴板次之」取第一个真值。
+有单测锁住（`test/run.js`：`未命中的触发器输出 {{{...}}} 必须被当成空`），
+且测试的默认 `inputs` 就按**真实形态**给（命中一路有值、另一路是回退串）——
+给空串的话那段逻辑**测不到**。
+
+##### `src/core.js` 顶部的 `VFLOW_CLICK_BROADCAST`
+
+⚠️ **`VFLOW_CLICK_BROADCAST`（`src/core.js` 顶部）是回退开关**，默认 `true`。
+置 `false` 时退回旧行为（按钮那条改回「脚本自己收」，但 receiver 已删 ⇒ 没人接）——
+它是**排查用的**，不是长期配置项。⚠️ 它**只影响岛路径**（`showFloatingPrompt` 的分流），
+不碰主体那条 `getActivity`。
 
 ##### ⚠️⚠️ 三条必须同时成立的契约（漏任一条都是**静默失效**）
 
@@ -849,10 +939,14 @@ vflowfc://click?act=window&pkg=tv.danmaku.bili&uid=0&type=url&url=<encodeURIComp
 **25 倍余量，够用**。所以这不是「extras 装不下」，而是「`data` 在
 精确寻址 + 无预算 + 可 scheme 过滤三件事上都更好」。
 
-**工作流侧怎么取**：广播触发器的 `data_uri` 输出拿到整串 ⇒
-`vflow.data.url_codec` 解码 + `vflow.data.parse_json`（或文本提取）拆出五个字段
-⇒ 拼 `am start` 命令给 `vflow.shizuku.shell_command`（全屏用
-`am start --windowingMode 1`，小窗用 `--windowingMode 5` —— 两者共用一条命令）。
+**工作流侧怎么取**：广播触发器的 `data_uri` 输出拿到整串，
+作为 `inputs.text` 喂回**同一个脚本**（`{{fluid_click_broadcast.data_uri}}`）⇒
+脚本顶层的 `parseClickPayload(input)` 认出它，走 `launchFromClick` ⇒ `launchWithMode`。
+
+⚠️ **工作流侧不需要拼 `am start`、不需要 `vflow.shizuku.shell_command`。**
+初稿曾写「拼 `am start --windowingMode N` 交给 shell」，那是**基于 §4.2 的错误结论**
+（以为 `ActivityOptions` 在 App 进程不可用）。实际打开走的是**普通 Java 调用**，
+**全程不碰 shell**。工作流这边只做「收广播 → 把 `data_uri` 转给脚本」这一件事。
 
 **契约 C（⚠️ 最容易漏的一条）：`PendingIntent` 的 `requestCode` 必须让每条通知、每条通道都不同。**
 
@@ -973,12 +1067,14 @@ if (!cancelCurrent) {
 | 识别链接 | 脚本 | 脚本（**照旧**，识别是纯计算） |
 | **弹什么、选什么** | 脚本自绘 `WindowManager` 浮窗 + 阻塞等待 | **工作流模块**：`vflow.logic.list.choose`（选项列表）、`vflow.ui.*` 那套 UI 积木 |
 | 用户选完 | 写回脚本的 `result`，脚本继续跑 | **工作流继续往下走**（`If` / 分支），**不需要回传** |
-| 打开 | 脚本调 `launchWithMode` | 工作流调 `am start` |
+| 打开 | 脚本调 `launchWithMode` | **仍然调脚本**：把选择结果拼成 `vflowfc://click?…` 喂回 `inputs.text` ⇒ 顶层分派走 `launchFromClick` |
 
 ⚠️ **这个搬法的前提是「选择之后要做的事，工作流能表达」** ——
-本项目恰好成立：选择之后的动作就是「打开某个链接」（`launchWithMode`），
-而它已经被 §4.2 的方案简化为**一条 `am start` 命令**（见下）。
+本项目恰好成立：选择之后的动作就是「打开某个链接」，
+而它**只需要复用已经写好的 `launchFromClick`**（§4.6 出路 ① 那条路已经打通）。
 ⇒ **不需要把 2400 行脚本逻辑搬进工作流，只需要搬「选择」这一步。**
+⚠️ **也不需要工作流去拼 `am start` 命令** —— 打开是脚本的 `launchWithMode` 干的
+（纯 Java 调用，不走 shell）。工作流只负责**收集选择 + 把它送回脚本**。
 
 ⚠️ **不成立的反例（别硬搬）**：若某个选择之后要跑的**是脚本里的大段逻辑**
 （比如「重新识别」——它要重新走一遍 `RecognitionMain` + 再弹框），
@@ -1030,10 +1126,10 @@ if (!cancelCurrent) {
 |---|---|
 | **只覆盖「终结动作」** | 见上一小节的 A / B 两类。B 类（多链接选择 / 打开方式选择）**不能靠回传**，得把选择本身搬进工作流 |
 | **只绕开「岛这一处」的子类化** | 岛/浮窗的**构造**部分（`Notification.Builder` / `PendingIntent` / `Icon` / `Bundle`）**不涉及子类化**，本来就没问题；而 `core.js` 别处若再出现「实现抽象类」仍会撞墙（根治要出路 ②） |
-| **需要 Shizuku / Root** | 广播触发器本身不需要，但**打开链接**走的是 `am start`（§4.2 的 shell 通道）⇒ 仍依赖 |
+| **不需要 Shizuku / Root** | ⚠️ **更正**：初稿此处写「打开链接走 `am start` ⇒ 仍依赖 Shizuku」。**错** —— 打开走的是 `launchWithMode`（`ActivityOptions` / `startActivityAsUser`），**纯 Java 调用**；`am start` 那条 shell 只在「系统选择框」这一个对话框分支里用（`core.js:2612`） |
 | **`setPackage` 要填对包名** | 填错 ⇒ 广播**发不出去**（`FLAG_EXCLUDE_STOPPED_PACKAGES` 之类不会兜底）。⚠️ 用 `context.getPackageName()` 而不是硬编码 |
 | **跨用户场景** | 原实现用 `createPackageContextAsUser` 取图标（`core.js:1918`），广播本身不跨用户；`data` 里带 `uid` 由工作流侧处理 |
-| **`am start --windowingMode` 的事务语义** | 与 `service call 138` **不同**（一个走 shell 命令、一个走 binder 事务码）。⚠️ **已实测能开小窗**（见 §4.2），但**机型覆盖未验** |
+| **隐藏 API 策略** | 小窗靠 `ActivityOptions.setLaunchWindowingMode`（§4.2）—— 本机实测放行，但**换机型/换 ROM 可能被拦**，那时小窗会**静默变成全屏**。⚠️ 回读 `dumpsys` 里 `mode=freeform` 是唯一判据 |
 
 ##### 与出路 ② 的关系
 
@@ -1064,7 +1160,7 @@ if (!cancelCurrent) {
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | 建 vFlow 工作流：`vflow.trigger.clipboard` + 标签「剪切板」 | ✅ 走 API 创建（`tools/create-workflow.py`） |
+| 1 | 建 vFlow 工作流：`vflow.trigger.clipboard` + 标签「剪切板」 | ✅ 走 API 创建（`tools/install-workflows.py`） |
 | 2 | 移植 `core.js`（**改 3 处专有 API + 1 处路径 + 1 处 `factTag`**） | ✅ 5 类补丁**一次性做完**，结果落盘为 `src/core.js`（改动点就地标 `/* [vflow] */`，共 12 处）。⚠️ 架构调整后**不再有构建期出现次数断言**（见 §3.5），改由 `test/run.js` 的产物 + 源码双路断言兜底 |
 | 3 | 规则库放进 vFlow 可读目录 | ✅ `/sdcard/vFlow/fluid-cloud/` |
 | 4 | `vflow.system.js` 步骤 | ✅ 引导脚本 + `eval`（§7.2） |
@@ -1073,10 +1169,11 @@ if (!cancelCurrent) {
 
 **P0 验收判据**（真机，逐条对 §7.1）：
 - [x] 复制一条含链接的分享文案 → 浮窗弹出，标题/副标题正确
-- [ ] 点浮窗主体 → 全屏打开链接（**待人工点一次确认**）
 - [x] 规则命中（「打开哔哩哔哩」）
 - [x] `console.log` 输出能在 logcat 里看到（`JsScript: [fluid-cloud] …`）
-- [ ] ~~岛形态~~ —— **被 §4.6 阻塞**，见 P1 第 0 项
+- [x] **岛形态**（2026-10-08，走 §4.6 出路 ①）—— 点按钮 → 广播 → 工作流 → **小窗打开**（`Task{… mode=freeform}`）
+- [x] **小窗打开**（2026-10-08）—— `ActivityOptions` 那条路实证可用（§4.2）
+- [ ] 点浮窗主体 → 全屏打开链接（**待人工点一次确认**）
 
 ### P1 —— 补齐触发源与打开方式
 
@@ -1086,7 +1183,7 @@ if (!cancelCurrent) {
 | **0b** | （可选，根治）**补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ②。做完 0 之后**优先级下降**；它是本批**唯一要改 vFlow 核心代码**的项 |
 | 7 | QQ / 微信触发源 | `vflow.trigger.activity_changed` + `class_filter` 精确匹配；脚本里改用 `intent_uri` 抠 `S.url=` / `S.rawUrl=` |
 | 8 | 附加插件广播触发源 | `vflow.trigger.broadcast` + `extras_json`；⚠️ 需确认附加插件（`com.nyehueh.fluidcloud`）是否要改，或改用 vFlow 自己的广播 |
-| 9 | 小窗打开 | `service call activity_task 138`（§4.2）；非小米机型降级全屏 |
+| ~~9~~ | ~~小窗打开~~ | ✅ **已具备，不必做** —— 上游原样的 `ActivityOptions` 在 JS 里直接可用（§4.2，2026-10-08 真机实证）。原计划的 `service call activity_task 138` **不需要** |
 | 10 | 选项列表对话框 | 用 `vflow.logic.list.choose` 替代自绘 WindowManager View |
 
 ### P2 —— 完整形态
@@ -1108,18 +1205,21 @@ if (!cancelCurrent) {
 | 1 | **`factTag` 未接上** | 脚本走错分支 / 全部落空，**不报错** | 脚本开头显式赋值 + 兜底空串；用日志打印实际值 |
 | 2 | **`[[__trigger_label]]` 未设置** | 值是**空串**（不是 `VNull`）⇒ `If` 比较恒 false | 每个触发器都要填标签；未命中时脚本要有默认分支 |
 | 3 | **规则文件路径不可读** | 规则库为空 ⇒ 识别不出任何链接，**表现为「功能没反应」** | 脚本启动时检查文件存在性并**显式报错**（原脚本有 `throw "核心文件不存在"`） |
-| 4 | **`service call 138` 事务码失效** | 小窗静默变成全屏（或失败） | 按 `script-system-overview.md` §6.2 做 `mode=freeform` **回读验证** |
+| 4 | ~~**`service call 138` 事务码失效**~~ | ~~小窗静默变成全屏（或失败）~~ | ⚠️ **本条已作废**：小窗走的是 `ActivityOptions`（§4.2），**根本不用 shell**。⚠️ 但换机型时**仍要回读**：新机型可能**拦隐藏 API**，那时小窗会**静默变成全屏**（`startActivity` 不抛、只是忽略窗口模式）⇒ 判据仍是 `dumpsys` 里 `mode=freeform` |
 | 5 | **`vflow.system.js` 无超时生效** | 脚本死循环**永久挂住执行线程**（FORK.md：引擎有超时能力但**两个调用点都不传**） | ⚠️ **本项目直接暴露在这个风险下**（§7 未决项） |
 | 6 | **岛参数两份实现漂移** | 若 P0 脚本内拼 + P1 转模块化，两份 `param_v2` 会不一致 | §4.1：转 B 时**必须删掉脚本那份** |
 | 7 | **Xposed 通道未连接** | `activity_changed` 触发器**静默不触发**（P1 的 QQ/微信源） | 首页有 Xposed 状态卡；`TriggerService` 会显示提示 |
 | 8 | **`extras_json` 被截断** | 广播 extras 超 8 KiB 时 `truncated=true`（`BroadcastTriggerHandler` 的预算） | 检查 `truncated` 输出；附加插件的 URL 通常很短，风险低 |
+| 9 | ⚠️⚠️ **API 的 `parameters` 形状传错** | `POST` 传 `{"type","value"}` 形状 ⇒ **返回 0 成功**，但 DTO 被**原样落盘** ⇒ 脚本读到的 `inputs` 是一个 `{"type":"dictionary",…}` 对象而不是 map，**报错信息完全不指向这里** | 只传**裸值**（`tools/install-workflows.py` 的 `build_payload`）；创建后**必须回读核对**（该脚本的 `verify()`） |
+| 10 | ⚠️⚠️ **API 的 `PUT /workflows/{id}` 根本不写盘** | `handleUpdateWorkflow`（`WorkflowHandler.kt:247-252`）解析完请求体**只回 `successResponse`**，从头到尾没调 `saveWorkflow` ⇒ 返回 `0 success` 而**工作流一个字节都没变** | **不用 PUT**。改脚本走「删掉重建」（`install-workflows.py --force`）。⚠️ 同文件里 `handleCreateWorkflow` 是**真的**写盘的（`:234`），所以 POST 可信 |
 
 ---
 
 ## 7.1 P0 真机验证记录（2026-10-07，小米 MIX Fold 3 / Android 17）
 
 > 设备：`192.168.1.32:38079`（无线调试）。工作流 id `aa070997-fdba-46bd-9ef7-e1fb7a7ac5cf`。
-> 全流程走的是**远程 API**（`tools/create-workflow.py`），没有手工粘贴 —— 见 §7.2。
+> 全流程走的是**远程 API**（`tools/create-workflow.py`，**2026-10-08 已被
+> `tools/install-workflows.py` 取代**），没有手工粘贴 —— 见 §7.2。
 
 ### ✅ 已通过
 
@@ -1194,9 +1294,9 @@ vFlow 远程 API 的请求体上限是 **24 KB**（`BaseHandler.readBody` 的
 
 | # | 问题 | 影响 | 何时需要答 | 现状 |
 |---|---|---|---|---|
-| 0 | **岛通知怎么绕开「不能 `new` 抽象类」** | **P0 的头号阻塞项**。见 §4.6 的四条出路 | P1 第一项 | ✅ **已定案**（2026-10-07）：**脚本只发广播、不当接收方**，由 vFlow 广播触发器接（§4.6 出路 ①）。**未实施** |
-| 0a | **按钮 extras 的字段设计** | 固定 action 后，靠 extras 区分「哪一次、打开什么、怎么打开」⇒ 字段一旦定错，工作流侧拼不出正确命令 | 实施出路 ① 时**先定** | ⚠️ **未定**。必须与「工作流里怎么取值」一起定（§4.6 的契约 B） |
-| 0b | **岛的超时兜底怎么办** | 不阻塞后，原来「3 秒后自动收岛」那一段（`core.js:1965`）要不要保留？改由 `islandTimeout` 承担的话，**岛会不会自己消失**未验证 | 实施出路 ① 时 | ⚠️ **未验**（需真机看岛的超时行为） |
+| 0 | **岛通知怎么绕开「不能 `new` 抽象类」** | **P0 的头号阻塞项**。见 §4.6 的四条出路 | P1 第一项 | ✅ **已定案并已实施**（2026-10-08）：**脚本只发广播、不当接收方**，由 vFlow 广播触发器接（§4.6 出路 ①）。**真机验证通过**（点按钮 → 小窗打开） |
+| 0a | **按钮载荷的字段设计** | 固定 action 后，靠 `data` 载荷区分「哪一次、打开什么、怎么打开」⇒ 字段一旦定错，工作流侧拼不出正确命令 | 实施出路 ① 时**先定** | ✅ **已答**：`data` 放 URI（**不放 extras**），字段 `act` / `nid` / `pkg` / `uid` / `type` / `url`（§4.6「载体选型」）。**真机验证通过** |
+| 0b | **岛的超时兜底怎么办** | 不阻塞后，原来「3 秒后自动收岛」那一段（`core.js:1965`）要不要保留？改由 `islandTimeout` 承担的话，**岛会不会自己消失**未验证 | 实施出路 ① 时 | ⚠️ **半答**：通知栏那条改由系统级 `setTimeoutAfter` 兜底（**已验证 3 秒消失**）；**岛本身**在 `islandTimeout` 从 10 改成 3 之后的存活**仍未验**（要用户看一眼） |
 | 0c | **`com.android.tools:r8` 作运行期依赖的体积代价** | **出路 ②**（根治）需要 `dx`（约 1 MB）打进 APK。是否接受？是否只给 `:app` 加、`:core` 不加？ | 若做出路 ② | 未答（做 ① 则不需要） |
 | 0d | **`rhino-android` 要不要直接用** | 它 2021 年停更、绑 `rhino-runtime:1.7.13`（vFlow 用 1.9.0）⇒ **不建议直接依赖**，倾向自己实现那一层 | 若做出路 ② | 倾向**自己写**（做 ① 则不需要） |
 | 1 | **配置目录放哪** | 决定 §3.3 的全部路径改造 | P0 第 3 步之前 | ✅ **已答**：`/sdcard/vFlow/fluid-cloud/`（实测可读写） |

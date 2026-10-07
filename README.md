@@ -38,12 +38,12 @@ node src/generate.js       # 2. adapter + core → dist/vflow-fluid-cloud.js（�
 
 > ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
 > **不是生成器** —— 没有「跑一下生成 dist/bootstrap.js」这回事。
-> 改它之后要把新内容贴进工作流（`python tools/create-workflow.py --update`）。
+> 改它之后要把新内容推回工作流（`python tools/install-workflows.py --force`）。
 
 ## 测试
 
 ```bash
-npm test          # 等价于 node test/run.js（33 例）
+npm test          # 等价于 node test/run.js（57 例）
 npm run check     # build + 语法检查 + test
 ```
 
@@ -65,21 +65,35 @@ adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
 # 3. 版本号（给将来的更新机制用，见 docs/DESIGN.md §3.4.4）
 adb push version /sdcard/vFlow/fluid-cloud/version
 
-# 4. 工作流（只创建一次，之后改脚本不用动它）
-python tools/create-workflow.py            # 首次
-python tools/create-workflow.py --update   # 之后（按名字找到并覆盖）
+# 4. 工作流（建一次，之后改脚本不用动它）
+python tools/install-workflows.py          # 建缺失的；已存在则跳过
+python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉重建）
 ```
 
-工作流配置（`tools/create-workflow.py` 会照这个建）：
+工作流配置（`tools/install-workflows.py` 会照这个建）——
+⭐ **一个工作流、两个触发器**（两条触发路跑的是同一份脚本）：
 
-| 步骤 | 模块 | 参数 |
+| 工作流 | 触发器 | `inputs`（键 → 值） |
 |---|---|---|
-| 触发器 | `剪贴板变更`（`vflow.trigger.clipboard`） | 标签填 `剪切板` |
-| 1 | `JavaScript脚本`（`vflow.system.js`） | `script` = `src/bootstrap.js` 全文（**不是**完整脚本）<br>`inputs` = `{ "text": "{{触发器.text_content}}", "trigger_label": "[[__trigger_label]]" }` |
+| **流体云** | ① `剪贴板变更`（`vflow.trigger.clipboard`），标签 `剪切板`<br>② `广播`（`vflow.trigger.broadcast`），action `…fluidcloud.CLICK`、scheme `vflowfc`，标签 `点击` | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `[[__trigger_label]]` |
+
+它的 `script` 是 `src/bootstrap.js` 全文（**不是**完整脚本）。
+
+> ⚠️ **曾经是两个工作流**（「流体云」+「流体云·点击」），2026-10-08 合并成一个。
+> 合并后有个**必须知道的新坑**：vFlow 对**未命中的触发器输出**不是给空串，
+> 而是回退成字面量 `{{{stepId.outputId}}}`（**三个花括号**）——
+> 一次执行里必然有一路是这个形态，脚本侧要在 `src/adapter.js` 的 `input` 里认出来当空处理，
+> 否则会拿它去识别链接、**弹一个无意义的岛且不报错**。详见 `docs/DESIGN.md` §4.6。
 
 ⚠️ **为什么工作流里放的是 `bootstrap.js` 而不是完整脚本**：vFlow 远程 API 的请求体上限
 是 **24 KB**（实测边界 24065 字节），而完整脚本 113 KB。引导脚本只有约 2 KB，
 它从设备文件读完整脚本并 `eval`。⇒ **改脚本只需 `adb push`，不用重新建工作流。**
+
+> ⚠️⚠️ **API 的 `parameters` 只能传裸值，不能传 `{"type","value"}` 形状** ——
+> 远程 API 的 `POST` 走 `SimpleCreateWorkflowRequest`（`Map<String, Any?>`），
+> 而 `PUT` 走 `UpdateWorkflowRequest`（`Map<String, VObjectDto>`）**且根本没有写盘逻辑**。
+> 传错形状**不报错**，只是把 DTO 原样存进工作流、脚本从此读不到内容。
+> 详见 `tools/install-workflows.py` 文件头。
 
 ## 改造点（相对上游）
 
@@ -88,7 +102,7 @@ python tools/create-workflow.py --update   # 之后（按名字找到并覆盖�
 1. 删 3 行 ShortX protobuf 类的 `importClass`
 2. `showToast` → `vflow.device.toast`
 3. `CopyText` → `vflow.system.set_clipboard`
-4. 一处 `ShellCommand` → `vflow.shizuku.shell_command`
+4. 一处 `ShellCommand` → `vflow.shizuku.shell_command`（**全脚本唯一用 shell 的地方**）
 5. 9 处配置路径 → `/sdcard/vFlow/fluid-cloud`
 
 另加适配层（`src/adapter.js`）补的全局变量：`input` / `tiggerTag` / `DebugMode` /

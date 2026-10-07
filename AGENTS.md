@@ -128,7 +128,7 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 
 ```bash
 npm run build     # 两步全跑：合并规则 → 拼接脚本
-npm test          # 离线测试（33 例）
+npm test          # 离线测试（57 例）
 npm run check     # build + 语法检查 + test
 
 # 单独跑某一步（改了什么跑什么）
@@ -138,7 +138,7 @@ node src/generate.js       # 改了 adapter.js 或 core.js 后
 
 > ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
 > **不是生成器**，没有「跑一下生成 dist/bootstrap.js」这回事。
-> 改它之后要**手动把新内容贴进工作流**（或 `tools/create-workflow.py --update`）。
+> 改它之后要把新内容推回**两个**工作流：`python tools/install-workflows.py --force`。
 
 ---
 
@@ -157,9 +157,9 @@ adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
 # 3. 版本号（给将来的更新机制用，见 docs/DESIGN.md §3.4.4）
 adb push version /sdcard/vFlow/fluid-cloud/version
 
-# 4. 工作流只创建一次（用远程 API）
-python tools/create-workflow.py          # 首次
-python tools/create-workflow.py --update # 之后（按名字找到并覆盖）
+# 4. 工作流（用远程 API；建一次，之后改脚本不用动它）—— 一个工作流挂两个触发器
+python tools/install-workflows.py          # 建缺失的；已存在则跳过
+python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉重建）
 ```
 
 ⚠️ **Windows + Git Bash 下 `adb push` 前要 `export MSYS_NO_PATHCONV=1`**，
@@ -196,7 +196,7 @@ vFlow 工作流
 | 1 | 3 行 `importClass` | `Packages.tornaco.apps.shortx...` | 删除 |
 | 2 | `showToast` | `shortx.executeAction(ShowToast…)` | `VFLOW_ADAPTER.toast` → `vflow.device.toast` |
 | 3 | `CopyText` | `shortx.executeAction(WriteClipboard…)` | `VFLOW_ADAPTER.setClipboard` → `vflow.system.set_clipboard` |
-| 4 | `OpenMain` 的 shell | `shortx.executeAction(ShellCommand…)` | `VFLOW_ADAPTER.shell` → `vflow.shizuku.shell_command` |
+| 4 | `OpenMain` 的 shell（**仅 1 处**，在「系统选择框」分支） | `shortx.executeAction(ShellCommand…)` | `VFLOW_ADAPTER.shell` → `vflow.shizuku.shell_command` |
 | 5 | 9 处路径 | `ShortX_Path + "/data/Fluid_Cloud_Island"` | `FLUID_CLOUD_DIR`（`/sdcard/vFlow/fluid-cloud`） |
 
 ⚠️ **改动点在源码里就地标注**（`/* [vflow] */`，共 12 处）。
@@ -286,7 +286,7 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 |---|---|
 | `src/adapter.js` / `src/core.js` | `npm run check` + **重新 `adb push` 完整脚本** |
 | `src/rules/` / `src/nolinkrules/` | `npm run check` + 重新 push **两个 JSON** |
-| `src/bootstrap.js` | `npm run check` + **把新内容贴进工作流**（`tools/create-workflow.py --update`） |
+| `src/bootstrap.js` | `npm run check` + **推回工作流**（`tools/install-workflows.py --force`） |
 | `version` | 改了产物就一并改它（§3.4.4） |
 | ⚠️ `reference/` | **一律不改** —— 那是来历记录，改了就失去对照价值 |
 

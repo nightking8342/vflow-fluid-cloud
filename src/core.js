@@ -1870,30 +1870,30 @@ function showIslandNotification(opts, result, timeout) {
         }
         // 生成唯一通知ID
         var notificationId = java.lang.System.currentTimeMillis() & 0x7fffffff;
-        // 【vflow】点击交给工作流（不再自己 new BroadcastReceiver —— 那行在 vFlow 里必然抛）。
-        //          详见本文件顶部的「点击交给工作流 —— 广播回传」注释块。
-        //          ⚠️ 两条 PendingIntent 的 requestCode 与 data 都不同 —— 见
-        //             `createClickBroadcastIntent` 的注释（PendingIntent 的等价判据含
-        //             requestCode + data，两条若全同会互相顶掉，表现是「点按钮变全屏」）。
+        // 【vflow】⚠️⚠️ **只改「按钮」那一条，主体那条保持上游原样。**
+        //
+        //  上游这里有两条 PendingIntent，**只有一条被 vFlow 阻塞**：
+        //
+        //  | 通道 | 上游写法 | 谁接 | 被阻塞？ |
+        //  |---|---|---|---|
+        //  | **主体**（点通知/岛本体） | `getActivity(createLaunchIntent(...))` | **系统**直接拉起 Activity | ❌ **不阻塞** —— 脚本完全不参与 |
+        //  | **按钮**（岛上的「浮窗打开」） | `getBroadcast` → **脚本自己 `registerReceiver` 的 receiver** | 脚本 | ✅ **被阻塞**（`new BroadcastReceiver` 必然抛，见 DESIGN.md §4.6） |
+        //
+        //  ⇒ **主体不许改**。它本来就没坏；改成广播只会多绕一圈，
+        //    还平白要求「工作流必须在场」。（我第一版把两条一起改了，是错的。）
+        //
+        //  ⇒ **按钮必须改**：`getBroadcast` 的目标从「脚本的 receiver」换成
+        //    **工作流**（vFlow 广播触发器接），脚本从此不当接收方。
+        //    详见本文件顶部的「点击交给工作流」注释块。
+        //
+        // ⚠️ 唯一的例外是 `pull_small_window == false` 时的**主体**：上游那里也是
+        //    `getBroadcast(ACTION_CLICK_MAIN)` 发给脚本自己的 receiver ⇒ **同样被阻塞**
+        //    （receiver 已经删了，不改的话那条 PendingIntent 会发给空气、静默无效）。
+        //    所以这一条也一并改走工作流。
         var mainIntent;
         var mainPendingIntent;
-        var buttonPendingIntent;
-        if (VFLOW_CLICK_BROADCAST && openWith) {
-            // 主体点击 = 全屏打开；按钮点击 = 小窗打开（与原来 resultOnClick/resultOnButton 一致）
-            var mainAct = opts.resultOnClick || "fullscreen";
-            var buttonAct = opts.resultOnButton || "window";
-            // ⚠️⚠️ **两条必须用【不同的 requestCode】** —— `notificationId + 1` 是按钮。
-            //    两条 PendingIntent 的 data 里只有 `act=` 不同，而 **`requestCode` 与 data
-            //    都参与等价判据**（`PendingIntentRecord.Key.equals`），所以 data 不同本来
-            //    就足以区分；但**再多一道 requestCode 更保险** —— 万一将来有人把 `act`
-            //    从 payload 里去掉，两条就会完全同身份、**按钮静默变成全屏**（不报错）。
-            //    加一不加价。
-            mainPendingIntent = createClickBroadcastIntent(
-                buildClickPayload(openWith, mainAct, notificationId), notificationId);
-            buttonPendingIntent = createClickBroadcastIntent(
-                buildClickPayload(openWith, buttonAct, notificationId), notificationId + 1);
-        } else if (pull_small_window && openWith) {
-            // 旧行为（VFLOW_CLICK_BROADCAST=false 时）：主体直接启动 Activity，按钮仍需脚本接收
+        if (pull_small_window && openWith) {
+            // ⬅️ 上游原样：系统直接拉起 Activity，脚本不参与
             mainIntent = createLaunchIntent(openWith);
             mainPendingIntent = PendingIntent.getActivity(
                 context,
@@ -1901,14 +1901,22 @@ function showIslandNotification(opts, result, timeout) {
                 mainIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
             );
-            var fallbackButtonIntent = new Intent(FLUID_CLOUD_ACTION_CLICK);
-            buttonPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackButtonIntent, PendingIntent.FLAG_IMMUTABLE);
         } else {
-            var fallbackMainIntent = new Intent(FLUID_CLOUD_ACTION_CLICK);
-            mainPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackMainIntent, PendingIntent.FLAG_IMMUTABLE);
-            var fallbackButtonIntent2 = new Intent(FLUID_CLOUD_ACTION_CLICK);
-            buttonPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackButtonIntent2, PendingIntent.FLAG_IMMUTABLE);
+            // ⬅️ 上游此处是 `getBroadcast(ACTION_CLICK_MAIN)` → 脚本 receiver（已被删）⇒ 改走工作流
+            mainPendingIntent = createClickBroadcastIntent(
+                buildClickPayload(openWith, opts.resultOnClick || "fullscreen", notificationId),
+                notificationId);
         }
+        // ⚠️⚠️ **按钮这条是本次改动的主角**（上游 `getBroadcast(ACTION_CLICK_BUTTON)` → 脚本 receiver）。
+        //
+        //  `requestCode` 用 `notificationId + 1`，与主体那条（`notificationId`）**必须不同**：
+        //  两条的 `data` 本来就有 `act=` 之差（`PendingIntentRecord.Key.equals` 含
+        //  `requestIntent.filterEquals`，而它比 data），data 不同就足以区分；
+        //  但**再多一道 requestCode 更保险** —— 万一将来有人把 `act` 从载荷里去掉，
+        //  两条就会完全同身份、**按钮静默变成全屏**（不报错）。加一不加价。
+        var buttonPendingIntent = createClickBroadcastIntent(
+            buildClickPayload(openWith, opts.resultOnButton || "window", notificationId),
+            notificationId + 1);
         // 获取应用图标用于超级岛
         var appIcon = null;
         if (pkg) {
@@ -2172,7 +2180,16 @@ var FLUID_CLOUD_ACTION_CLICK = "com.chaomixian.vflow.fluidcloud.CLICK";
 /** `data` 的 scheme —— 工作流那边要填 `addDataScheme("vflowfc")` 才能收到。 */
 var FLUID_CLOUD_DATA_SCHEME = "vflowfc";
 
-/** 点击回传的开关（默认开）。关掉时退回旧的自绘浮窗行为。 */
+/**
+ * 岛**按钮**那条回传的开关（默认开）。
+ *
+ * ⚠️ 它**只影响岛路径**（`showFloatingPrompt` 的分流 + `showIslandNotification` 里
+ *    按钮那条 PendingIntent）。**不碰主体那条** —— 主体是 `getActivity`，
+ *    由系统直接拉起 Activity，脚本不参与，**本来就没被 vFlow 阻塞**，不该改。
+ *
+ * 关掉时按钮那条改回「脚本自己收」的写法（但 receiver 已删 ⇒ 实际没人接），
+ * 是**排查用的**，不是长期配置项。
+ */
 var VFLOW_CLICK_BROADCAST = true;
 
 /**

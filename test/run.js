@@ -102,11 +102,30 @@ function functionBodyOf(src, name) {
  * ⚠️ 每次都重建沙箱 —— 脚本有大量全局状态（`config` / `defaultBrowser` / `UserIds`），
  *    复用沙箱会让用例之间互相污染（实测过：第二个用例拿到的 config 是第一个改过的）。
  */
+/**
+ * vFlow 对**未命中的触发器输出**的回退形态。
+ *
+ * ⚠️⚠️ **不是空串，是 `{{{stepId.outputId}}}`（三个花括号）** ——
+ * `VariableResolver.kt:133` 的 `VObjectFactory.from("{${segment.rawExpression}}")`，
+ * 而 `rawExpression` 本身已含 `{{ }}`。
+ *
+ * 一个工作流挂两个触发器时，**一次执行必然有一路是这个形态**（真机实测确认），
+ * 所以测试里的 `inputs` 默认就按**真实形态**给：命中一路有值、另一路是回退串。
+ * 若图省事给空串，`adapter.js` 里那段「认回退串」的逻辑就**测不到**。
+ */
+const UNRESOLVED = (id, out) => '{{{' + id + '.' + out + '}}}';
+
 function run(opts) {
     const o = opts || {};
+    // ⚠️ 两条触发路（见 tools/install-workflows.py 的 INPUTS）。默认：剪贴板命中、点击未命中。
+    //    `o.text` 走剪贴板那一路；`o.text` 以 `vflowfc://` 开头时按点击那一路给。
+    const isClick = typeof o.text === 'string' && o.text.indexOf('vflowfc://') === 0;
     const ctxVars = {
         inputs: {
-            text: o.text !== undefined ? o.text : '',
+            click_uri: isClick ? o.text : UNRESOLVED('fluid_click_broadcast', 'data_uri'),
+            clipboard_text: isClick
+                ? UNRESOLVED('fluid_trigger_clipboard', 'text_content')
+                : (o.text !== undefined ? o.text : ''),
             trigger_label: o.tag !== undefined ? o.tag : '剪切板'
         },
         vars: {},
@@ -154,9 +173,39 @@ test('适配层注入了 core.js 依赖的全部全局变量', () => {
     }
 });
 
-test('input 取自 inputs.text', () => {
+test('input 取自 inputs.clipboard_text（剪贴板那一路）', () => {
     const { sandbox } = run({ text: 'https://example.com/a' });
     assertEq(sandbox.input, 'https://example.com/a');
+});
+
+test('input 取自 inputs.click_uri（点击那一路，优先级高于剪贴板）', () => {
+    const { sandbox } = run({ text: 'vflowfc://click?act=window&url=https%3A%2F%2Fa.com' });
+    assertEq(sandbox.input, 'vflowfc://click?act=window&url=https%3A%2F%2Fa.com');
+});
+
+test('⚠️ 未命中的触发器输出 `{{{...}}}` 必须被当成空 —— 不能拿去识别链接', () => {
+    // ⚠️⚠️ 这是**一个工作流挂两个触发器**之后新增的、最容易漏的一条：
+    //    vFlow 对未命中的输出回退成字面量 `{{{stepId.outputId}}}`（三个花括号），
+    //    直接当值用 ⇒ 脚本会拿它去识别链接 ⇒ **弹一个无意义的岛，且不报错**。
+    const { sandbox } = run({ text: '{{{fluid_trigger_clipboard.text_content}}}' });
+    assertEq(sandbox.input, '', '未命中的输出必须当空处理');
+    // 反向锁：真正的值不能被误判成回退串
+    const { sandbox: s2 } = run({ text: 'https://a.com/x' });
+    assertEq(s2.input, 'https://a.com/x');
+});
+
+test('两条路都未命中时 input 是空串（不是回退串）', () => {
+    const { sandbox } = run({ text: '' });
+    assertEq(sandbox.input, '');
+});
+
+test('⚠️ 适配层不得再读 inputs.text —— 工作流那边已经没有这个键了', () => {
+    // ⚠️ 这条防的是「改了一半」：工作流侧（tools/install-workflows.py 的 INPUTS）
+    //    已把 `text` 拆成 `click_uri` / `clipboard_text` 两路，
+    //    若适配层还留着 `inputs.text` 的兜底分支，那条分支**永远取不到值**
+    //    —— 不报错、不崩溃，只是白写一段（而它会让人以为「text 这条路还在」）。
+    const adapter = stripComments(readSrc('adapter.js'));
+    assert(!/inputs\.text/.test(adapter), 'adapter.js 里还有 inputs.text 的引用');
 });
 
 test('tiggerTag 取自 inputs.trigger_label', () => {
@@ -516,7 +565,7 @@ test('payload 的 type=pkg 用 link 字段（与 launchWithMode 的口径一致�
     assert(p.includes('url=oof.disk%3A%2F%2Fabc'), `type=pkg 时应取 link 字段：${p}`);
 });
 
-test('showIslandNotification 弹完即返回（不阻塞），且两条 PendingIntent 都发出去了', () => {
+test('showIslandNotification 弹完即返回（不阻塞），且按钮那条改走工作流广播', () => {
     const { sandbox, calls: c } = run({ text: 'x' });
     const t0 = Date.now();
     const r = sandbox.showIslandNotification(islandOpts(), null, 3000);
@@ -531,22 +580,45 @@ test('showIslandNotification 弹完即返回（不阻塞），且两条 PendingI
     //    3000ms 是默认配置值，原样传给 setTimeoutAfter（单位同为毫秒）。
     assertEq(c.notify[0].notification._timeoutAfter, 3000, '通知没设 setTimeoutAfter（会永久留在通知栏）');
 
-    const broadcasts = c.pending.filter((p) => p.kind === 'broadcast');
-    assertEq(broadcasts.length, 2, '主体 + 按钮两条 PendingIntent 都该是 broadcast');
+    // ⚠️⚠️ **主体那条必须仍是 `getActivity`**（上游原样）。
+    //    它由**系统**直接拉起 Activity，脚本不参与 ⇒ **本来就没被 vFlow 阻塞**。
+    //    改成广播是**过度改动** —— 多绕一圈，还平白要求「工作流必须在场」。
+    //    （第一版真这么改过，用户 2026-10-08 指出「全屏那个地方明明都没有阻塞，你改什么」。）
+    const acts = c.pending.filter((p) => p.kind === 'activity');
+    assertEq(acts.length, 1, '主体那条应是 getActivity（系统直接拉起，脚本不参与）');
 
-    // 两条的 action 必须都是那个固定常量
-    for (const b of broadcasts) {
-        assertEq(b.intent._action, 'com.chaomixian.vflow.fluidcloud.CLICK', 'action 不对');
-        assertEq(b.intent._package, 'com.chaomixian.vflow', 'setPackage 没设对（应该是 vFlow 的包名）');
-    }
-    // ⚠️⚠️ 两条的 (requestCode, data) 必须都不同 —— 否则系统会把它们当成同一个
-    //    PendingIntent，表现是「点按钮变全屏」，**不报错**。见 createClickBroadcastIntent。
-    const [a, b] = broadcasts;
-    assert(a.requestCode !== b.requestCode, `两条 requestCode 相同（${a.requestCode}）—— 会互相顶掉`);
-    assert(String(a.intent._data) !== String(b.intent._data), '两条 data 相同 —— 会互相顶掉');
-    // 主体是全屏、按钮是小窗（与 resultOnClick / resultOnButton 对应）
-    assert(String(a.intent._data).includes('act=fullscreen'), `主体应是 fullscreen：${a.intent._data}`);
-    assert(String(b.intent._data).includes('act=window'), `按钮应是 window：${b.intent._data}`);
+    // ⚠️⚠️ **按钮那条才是被阻塞的**：上游是 `getBroadcast(ACTION_CLICK_BUTTON)`
+    //    → **脚本自己 registerReceiver 的 receiver**，而 `new BroadcastReceiver`
+    //    在 vFlow 里必然抛（DESIGN.md §4.6）⇒ 必须改走工作流。
+    const bcs = c.pending.filter((p) => p.kind === 'broadcast');
+    assertEq(bcs.length, 1, '按钮那条应是 getBroadcast（交给工作流的广播触发器）');
+    const btn = bcs[0];
+    assertEq(btn.intent._action, 'com.chaomixian.vflow.fluidcloud.CLICK', '按钮的 action 不对');
+    assertEq(btn.intent._package, 'com.chaomixian.vflow', 'setPackage 没设对（应该是 vFlow 的包名）');
+    assert(String(btn.intent._data).includes('act=window'), `按钮应是 window：${btn.intent._data}`);
+
+    // ⚠️ 两条的 `requestCode` 必须不同 —— 否则系统会把它们当成同一个 PendingIntent。
+    //    注意：这里**不能**再断言「两条 data 不同」了（主体那条已经没有 data），
+    //    `requestCode` 是唯一还成立的区分手段（见 createClickBroadcastIntent）。
+    assert(acts[0].requestCode !== btn.requestCode,
+        `主体与按钮的 requestCode 相同（${btn.requestCode}）—— 会互相顶掉`);
+});
+
+test('上游「主体走广播」那条分支在当前配置下不可达（`|| true` 恒真）', () => {
+    // ⚠️ 上游的 else 分支（`pull_small_window` 为假时，主体也走 `getBroadcast`
+    //    → 脚本 receiver）**当前不可达**：`var pull_small_window = config.pull_small_window || true`
+    //    对 `false` 也返回 `true`（`||` 是「假值才取右边」，不是「缺失才兜底」）。
+    //
+    //    ⇒ 这个用例**故意**把这个事实钉住，而不是去「测一条跑不到的分支」。
+    //      真去测它只会得到假红（我第一次就是这么写的）。
+    //
+    //    ⚠️ 上游这个 `|| true` 是个真 bug（用户 2026-10-08 指出），但**本次不动它** ——
+    //       它不阻塞任何东西，改它属于超出「只修被阻塞处」的范围。
+    const { sandbox, calls: c } = run({ text: 'x' });
+    sandbox.config.pull_small_window = false;
+    sandbox.showIslandNotification(islandOpts(), null, 3000);
+    assertEq(c.pending.filter((p) => p.kind === 'activity').length, 1,
+        '`|| true` 恒真 ⇒ 主体仍走 getActivity（这条断言就是那个事实本身）');
 });
 
 test('parseClickPayload ↔ buildClickPayload 往返一致（含 & 与中文）', () => {

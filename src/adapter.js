@@ -127,11 +127,29 @@ var VFLOW_ADAPTER = (function () {
 //    漏了会在运行时报 `ReferenceError: "input" is not defined`。
 // ---------------------------------------------------------------------------
 
-/** 本次触发的输入文本（剪贴板内容 / QQ·微信 Intent 里抠出的串 / 广播 extras 的 url）。 */
+/** 本次触发的输入文本（剪贴板内容 / 广播 `data_uri` / QQ·微信 Intent 里抠出的串）。 */
 var input = (function () {
-    // 优先级：inputs.text（工作流显式传入）> 剪贴板触发器输出
+    /**
+     * ⚠️⚠️ **未命中的触发器输出不是空串，而是 `{{{stepId.outputId}}}`（三个花括号）。**
+     *
+     * 这是 vFlow `VariableResolver` 对「解析不到」的回退
+     * （`VariableResolver.kt:133`：`VObjectFactory.from("{${segment.rawExpression}}")`，
+     * 而 `rawExpression` 本身已含 `{{ }}` ⇒ 拼出来是三层）。
+     *
+     * **一个工作流挂多个触发器时，未命中的那些输出全都会是这个形态**（实测确认）。
+     * 直接当值用 ⇒ 脚本会拿这串去识别链接 ⇒ **弹一个无意义的岛**，而且**不报错**。
+     * ⇒ 必须显式认出来、当空处理。
+     */
+    function unresolved(v) {
+        return typeof v !== "string" || v === "" || v.indexOf("{{{") === 0;
+    }
+
     if (typeof inputs !== "undefined" && inputs !== null) {
-        if (typeof inputs.text === "string" && inputs.text !== "") return inputs.text;
+        // 两个触发器各一路（见 tools/install-workflows.py 的 INPUTS）。一次执行只命中一个，
+        // 另一个必是 `{{{...}}}` ⇒ 这里谁有真值用谁。
+        // ⚠️ 点击 URI 排前面：它形态明确（`vflowfc://click?…`），且要被顶层分派认出来。
+        if (!unresolved(inputs.click_uri)) return inputs.click_uri;
+        if (!unresolved(inputs.clipboard_text)) return inputs.clipboard_text;
     }
     if (typeof vars !== "undefined" && vars !== null) {
         // 触发器输出经 `{{step.output}}` 展开后由工作流传进来时，可能落在命名变量里
