@@ -1,0 +1,83 @@
+{
+  "name": "telegram",
+  "tigger": [
+    "t\\.me/\\+",
+    "t\\.me/joinchat/",
+    "t\\.me/[^/]+\\?start=",
+    "t\\.me/(?!\\+)(?!joinchat/)[^/?]+$"
+  ],
+  "type": "url",
+  "check": "org.telegram.plus",
+  "Custom_variable": [
+    {
+      "name": "邀请码",
+      "action": "match",
+      "pattern": "t\\.me/(?:\\+|joinchat/)([A-Za-z0-9_-]+)",
+      "text": "link",
+      "index": 1
+    },
+    {
+      "name": "机器人参数",
+      "action": "match",
+      "pattern": "t\\.me/([^/]+)\\?start=([A-Za-z0-9_-]+)",
+      "text": "link",
+      "index": 2
+    },
+    {
+      "name": "机器人用户名",
+      "action": "match",
+      "pattern": "t\\.me/([^/]+)\\?start=([A-Za-z0-9_-]+)",
+      "text": "link",
+      "index": 1
+    },
+    {
+      "name": "匹配组",
+      "action": "match",
+      "pattern": "t\\.me/([^/?]+)$",
+      "text": "link",
+      "index": 1
+    }
+  ],
+  "rule": [
+    {
+      "condition": [
+        {
+          "condition_type": "contains",
+          "condition_text": "link",
+          "condition_pattern": "joinchat"
+        }
+      ],
+      "rule_text": "tg://join?invite=【邀请码】"
+    },
+    {
+      "condition": [
+        {
+          "condition_type": "contains",
+          "condition_text": "link",
+          "condition_pattern": "\\+"
+        }
+      ],
+      "rule_text": "tg://join?invite=【邀请码】"
+    },
+    {
+      "condition": [
+        {
+          "condition_type": "contains",
+          "condition_text": "link",
+          "condition_pattern": "start="
+        }
+      ],
+      "rule_text": "tg://resolve?domain=【机器人用户名】&start=【机器人参数】"
+    },
+    {
+      "condition": [
+        {
+          "condition_type": "notcontains",
+          "condition_text": "link",
+          "condition_pattern": "joinchat|\\+|start="
+        }
+      ],
+      "rule_text": "tg://resolve?domain=【匹配组】"
+    }
+  ]
+}

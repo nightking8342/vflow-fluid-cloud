@@ -1,0 +1,655 @@
+# vFlow 流体云 · 设计
+
+> **项目**：`vFlow 流体云` —— 把「复制 / 打开分享链接 → 识别 → 超级岛提示 → 全屏或小窗打开」
+> 这条链路做成 vFlow 工作流。
+> **状态**：**P0 已跑通**（浮窗形态，真机验证通过）；**超级岛形态被一处 vFlow 配置缺失阻塞**（§4.6，**已定位真因，可解**）。
+> **代码位置**：vFlow 分支 `feature/fluid-cloud-adapter`，工作区 `D:/develop/myProjects/vflow-fluid-cloud`。
+> **脚本来源**：`D:/develop/myProjects/shortx-Fluid_Cloud_Island`（本地克隆，分支 `vflow`，**未做任何改动**；
+> `version` = `3.2.3`，`core.js` 2810 行 / `onOpen.js` 223 行 / `update.js` 647 行）。
+>
+> ⚠️ 本文**所有关于 vFlow 现状的结论都已逐条核实过源码**（附 `file:line`）。
+> 关于原脚本行为的结论标【源码直读】；关于 vFlow 缺口的结论标【已核实】或【推断】。
+> **真机验证状态见 §7.1**（小米 MIX Fold 3 / Android 17）。
+>
+> **快速导航**：
+> - §4.6 —— ⚠️ **头号阻塞项**：`vflow.system.js` 里不能 `new` 抽象类。
+>   真因是 **vFlow 少覆写了 `ContextFactory.createClassLoader`**（不是 ART 的限制），
+>   含实测矩阵、与 ShortX 的逐层对照、四条出路
+> - §7.1 —— P0 真机验证记录（7 项通过 / 1 项阻塞 / 4 条既有行为）
+> - §7.2 —— 为什么用「引导脚本 + adb push」（远程 API 的 24 KB 上限）
+
+---
+
+## 0. 这份文档回答什么
+
+1. **要做的东西长什么样** —— 原脚本的功能结构（§1）。
+2. **vFlow 现在能做到哪一步** —— 逐条能力对照，有/没有/部分（§2）。
+3. **还差什么、怎么补** —— 缺口清单与实施方案（§3–§5）。
+
+**已与用户确认的三条边界**（2026-10-07）：
+
+- **超级岛通知**：vFlow 已有完整的岛装配层，但它**只服务于工作流执行进度通知**。
+  用户明确表示「vFlow 只是适配了超级岛这种通知模式，不一定需要它给工作流提供能力」——
+  ⇒ 本项目**不要求**先做出「用户可编排的岛通知模块」，
+  该能力在 §4.1 按「**新增一个模块**」评估，**不是阻塞项**。
+- **选中文本菜单触发器**（原脚本的 `OnMenuActionTrigger`）：用户在 ShortX 里**从未用过**，
+  且实测长按选中**没有反应**（该路径大概率已失效）⇒ **本项目不做**（§4.4）。
+- **错误弹窗**：vFlow 有 `vflow.device.toast` 等替代物，且该分支只在脚本异常时触发
+  ⇒ **用现有模块替代即可，不新增专用模块**（§4.5）。
+
+---
+
+## 1. 原脚本结构
+
+### 1.1 仓库构成
+
+| 文件 / 目录 | 行数 / 数量 | 作用 |
+|---|---|---|
+| `core.js` | 2810 行 | **核心逻辑全部在此**。规则匹配、链接识别、UI 构建、岛通知、小窗启动 |
+| `onOpen.js` | 223 行 | **指令启用时执行**。倒计时说明弹窗 → 写配置 → 从 GitHub 拉 `update.js` 并 `eval` |
+| `update.js` | 647 行 | **远程更新脚本**。从 GitHub 拉 `rules/*.json` 与 `nolinkrules/*.json`，增量合并到本地配置 |
+| `rules/` | 27 个 JSON | **有链接识别规则库**（115 / 夸克 / 淘宝 / 哔哩哔哩 …） |
+| `nolinkrules/` | 2 个 JSON | **无链接的文案规则**（如「打开shortx」→ 启动 ShortX） |
+| `version` | — | `3.2.3` |
+
+### 1.2 五条触发源
+
+| # | 原触发器 | tag | 捕获方式 | 用途 |
+|---|---|---|---|---|
+| 1 | `ClipboardContentChanged` | 剪切板 | 剪贴板变更 | 复制分享文案 → 识别链接 |
+| 2 | `OnMenuActionTrigger` | 选中 | **选中文本菜单** | 选中文本 → 识别链接（**本项目不做**，§4.4） |
+| 3 | `ActivityStarted` | QQ | 监听 `com.tencent.mobileqq/.activity.QQBrowserActivity` | 从 QQ 内置浏览器 Intent 里抠链接 |
+| 4 | `ActivityStarted` | 微信 | 监听 `com.tencent.mm/.plugin.webview.ui.tools.MMWebViewUI` | 从微信内置浏览器 Intent 里抠链接 |
+| 5 | `Broadcast` | 附加 | `com.nyehueh.fluidcloud.ACTION_URL_RECEIVED` | **外部附加插件**把链接投递进来 |
+
+⚠️ 3 / 4 两条不是「通用 Activity 监听」，而是**针对特定 Activity 类名的精确匹配**——
+这意味着它们**可以用 vFlow 的 `vflow.trigger.activity_changed` 的 `class_filter` 精确对应**（§2.1）。
+
+### 1.3 核心逻辑分层
+
+```
+触发（5 条）
+  ↓
+【第一层】取输入文本，并按 tag 分派到不同的提取方式
+  ├─ 剪切板 → {clipboardContent}
+  ├─ 选中   → {selectedText}
+  ├─ QQ     → JS 正则从 activityIntentUri 抠 S.url=...
+  ├─ 微信   → JS 正则从 activityIntentUri 抠 S.rawUrl=...
+  └─ 附加   → MVEL 从 intent.extras["url"] 取
+  ↓  统一写入变量 replaceResult
+【第二层】core.js 主体
+  ├─ 读取配置（/data/system/shortx*/data/Fluid_Cloud_Island/）
+  ├─ 规则匹配：rules/*.json 的正则 + 变量提取 + 条件判定
+  ├─ 识别结果 → 链接列表（可能多个）
+  ↓
+【第三层】展示与交互
+  ├─ 超级岛通知（NotificationManager + miui.focus.param）
+  ├─ 悬浮胶囊窗（WindowManager + TYPE_APPLICATION_OVERLAY）
+  └─ 选项列表对话框（自绘 WindowManager View）
+  ↓
+【第四层】打开方式
+  ├─ 全屏：startActivityAsUser
+  └─ 小窗：ActivityOptions.setLaunchWindowingMode + setLaunchBounds
+```
+
+**关键事实**：五条触发源在分派后**收敛成同一个入口**（`replaceResult` → `core.js`）。
+⇒ 项目的**核心成本在第一层与第三层**，中间那 2000 多行的规则逻辑是**纯 JS、与平台无关**。
+
+### 1.4 规则库格式（`rules/115.json` 为例）
+
+```json
+{
+  "name": "115",
+  "type": "url",
+  "tigger": ["[/.]115cdn\\.com", "[/.]115\\.com"],       // 命中这些正则才启用本规则
+  "check": "oof.disk://",                                 // 特征串
+  "Custom_variable": [                                    // 从链接里抽变量
+    { "name": "yywlink", "pattern": "^(.*?)(#|$)", "text": "link", "index": 1 }
+  ],
+  "rule": [                                               // 条件 → 产出文本
+    { "condition": [...], "rule_text": "oof.disk://openurl/【yywlink】?password=【cleancode】" }
+  ]
+}
+```
+
+- `【变量名】` 是脚本自己的占位语法（`getVariablevalues` / `SynthesisRule` 解析）。
+- 27 个规则文件全部是这个形状，**纯数据、无平台依赖** ⇒ **可以原样搬进 vFlow**。
+
+---
+
+## 2. vFlow 侧能力对照
+
+### 2.1 触发源对照
+
+| 原触发源 | vFlow 对应物 | 状态 | 证据 |
+|---|---|---|---|
+| 剪切板变更 | `vflow.trigger.clipboard` | ✅ **有** | `ClipboardTriggerModule.kt:38`；双通道（`standard` 进程内监听 / `core` 走 Shizuku 流式），输出 `text_content` / `image_content` |
+| 选中文本菜单 | 无 | ❌ **没有** | 全仓无 `OnMenuAction` / `ActionMode` / `onTextContextMenuItem` 命中；Xposed 通道只挂了一个 hook 点（`HookTargets.kt` 仅 `ActivityResumed`）⇒ 用户已判定不做（§4.4） |
+| QQ Activity | `vflow.trigger.activity_changed` | ✅ **有** | `ActivityChangedTriggerModule.kt:46`；底层 hook `ActivityRecord.activityResumedLocked`，输出含 **`intent_uri`**（`intent.toUri(1)`，`ActivityChangedSource.kt:280-292`）——**正是脚本要抠 `S.url=` 的那个串** |
+| 微信 Activity | 同上 | ✅ **有** | 同上，用 `class_filter` 精确匹配 `MMWebViewUI` |
+| 附加插件广播 | `vflow.trigger.broadcast` | ✅ **有** | `BroadcastTriggerModule.kt:70`；输出含 `extras_json`（`BroadcastTriggerModule.kt:225`）——脚本的 MVEL 取 `extras["url"]` 可由它替代 |
+
+> ⚠️ **`activity_changed` 依赖 Xposed 通道**（`ActivityChangedTriggerModule.kt:65` 声明 `XPOSED_HOOK` 权限）。
+> 本机设备已装 LSPosed 并验证过该通道（FORK.md 记有 P3/P4 真机结论），**前提成立**。
+
+### 2.2 动作层对照
+
+| 脚本用到的动作 | vFlow 对应物 | 状态 | 证据 |
+|---|---|---|---|
+| 写剪贴板 | `vflow.system.set_clipboard` | ✅ 有 | `SetClipboardModule.kt:30`（另有 Core 版 `vflow.core.set_clipboard`） |
+| 读剪贴板 | `vflow.system.get_clipboard` | ✅ 有 | `GetClipboardModule.kt:26` |
+| 执行 shell | `vflow.shizuku.shell_command` | ✅ 有 | 脚本里 `executeAction(ShellCommand)` 共 **2 处**（`core.js:2569` 等） |
+| Toast | `vflow.device.toast` | ✅ 有 | `ToastModule.kt:21` |
+| 启动 App / 打开链接 | `vflow.system.launch_app` / HTTP 模块等 | ✅ 有 | `LaunchAppModule.kt:25` |
+| **正则替换** | 无 | ❌ **没有** | `TextReplaceModule` 是**字面量**替换；`TextProcessingModule` 的 `regex_extract` **只提取不替换** ⇒ 见 §4.3 |
+| **超级岛通知** | 岛装配层存在，**但无工作流模块** | ⚠️ **部分** | `IslandNotificationDispatcher.dispatch` 的**生产调用点只有 2 处**，都在 `ExecutionNotificationManager.kt:399/451`（执行进度通知）⇒ 见 §4.1 |
+| **小窗** | 无模块 | ❌ **没有**，但有**已验证的绕过路径** | 见 §4.2 |
+
+### 2.3 脚本层对照
+
+| 能力 | vFlow `vflow.system.js` | 状态 |
+|---|---|---|
+| Rhino 引擎 | ✅ 与 ShortX 等价（同为 Rhino 1.9.0） | ✅ |
+| 真实 Android `context` | ✅ `JsExecutor.kt:72-76` 注入 `applicationContext` | ✅ |
+| `importClass` / `importPackage` | ✅ 已补（`ImporterTopLevel`） | ✅ |
+| `console` 对象 | ✅ 已补（`JsConsole.kt`，12 个方法） | ✅ |
+| 模块树 `vflow.*` | ✅ 约 195 个模块 | ✅ |
+| 读写全局变量 | ✅ `vars_api.setGlobalVar` / `removeGlobalVar` / `reloadGlobalVars`（`JsExecutor.kt:187-265`） | ✅ |
+| 超时保护 | ⚠️ 引擎支持但**两个既有调用点都不传** ⇒ **当前无生产消费者**（FORK.md 已记） | ⚠️ 见 §6-5 |
+| **系统 Context（UID 1000）** | ❌ 不可能（需 Xposed） | ❌ 但**本项目不需要**（§4.2） |
+
+> ⚠️ **`vflow.xposed.js` 不能用来跑 core.js**：它跑在 system_server、**不注入 `vflow.*` 模块树**
+> （`ScriptExecutor.kt:217`），而 core.js 依赖大量 Android UI 类与自己的文件读写。
+> 且它崩溃半径是整机。⇒ **本项目一律用 `vflow.system.js`**。
+
+---
+
+## 3. 脚本改造点
+
+### 3.1 平台专有 API 清单（**全量，只有三处调用点**）
+
+这是改造面最关键的量化结论：`core.js` 里对 ShortX 专有 API 的依赖**只有 3 处**：
+
+| 位置 | 代码 | 替代方案 |
+|---|---|---|
+| `core.js:84` | `shortx.executeAction(ShowToast…)` | `vflow.device.toast({ message: … })` |
+| `core.js:1801` | `shortx.executeAction(WriteClipboard…)` | `vflow.system.set_clipboard({ text: … })` |
+| `core.js:2569` | `shortx.executeAction(ShellCommand…)` | `vflow.shizuku.shell_command({ mode: 'auto', command: … })` |
+
+外加 3 行 import（`core.js:23/24/31`，`Packages.tornaco.apps.shortx.core.proto.action.*`）**整行删除**。
+
+> ✅ **结论**：脚本与原平台的耦合**极浅**。2000 多行核心逻辑（规则匹配、UI 构建、岛参数）
+> **全是公开 Android API + 纯 JS**，无需改动。
+
+### 3.2 `{factTag}` → `[[__trigger_label]]`
+
+脚本在 5 处读 `tiggerTag` / `factTag`（`core.js:2402/2513/2635/2724` 等）来判断「本次是哪条触发源」。
+
+- 原平台：短变量 `{factTag}`，值取自触发器的 `tag` 字段（`剪切板` / `选中` / `QQ` / `微信` / `附加`）。
+- vFlow：**已有等价机制** —— 触发器标签（`docs/fork/trigger-label-design.md`，已合入 `dev`）：
+  - 存储键 / 引用 / AI 三处同名 `__trigger_label`
+  - 工作流内以命名变量引用：`[[__trigger_label]]`
+  - **未设置 / 未命中时是空串**（不是 `VNull`），保证 `If` 比较不炸
+
+⇒ **改造方式**：在 vFlow 的每个触发器上填标签（`剪切板` / `QQ` / `微信` / `附加`），
+脚本里把 `factTag` 的取值来源改为 vFlow 的命名变量。
+
+⚠️ **`factTag` 在原脚本里被当作全局变量直接读**（`if(!isRunAction){ var tiggerTag=factTag; }`）。
+移植时需在脚本开头显式赋值：
+
+```javascript
+// vFlow 适配层：把命名变量接进来
+var factTag = (typeof inputs !== "undefined" && inputs.fact_tag) ? String(inputs.fact_tag) : "";
+```
+
+⚠️ **注入时机**：`WorkflowExecutor` 在 `execute()` 构造 `initialContext` 时
+把命中触发器的标签注入 `namedVariables`（FORK.md 已登记）。脚本侧读到的是**已展开的值**。
+
+### 3.3 路径与配置
+
+| 原平台侧 | vFlow 侧 | 说明 |
+|---|---|---|
+| `/data/system/shortx*/data/Fluid_Cloud_Island/` | 需重新选择 | ⚠️ **`/data/system/` 在 vFlow（UID 10684）不可写**（`script-system-overview.md:590-603` 有实测）⇒ 配置目录要改到 App 私有目录或 `/sdcard/` |
+| 配置文件 `config.json` / `rules.json` / `nolinkrules.json` | 同结构，换路径 | 纯 JSON，可原样迁移 |
+| `findRandomDirWithPrefix("/data/system/", "shortx")` | **删除**（vFlow 路径固定） | 这是原平台的多用户目录探测逻辑 |
+
+⚠️ **路径变更会牵动 `update.js`**（它负责从 GitHub 拉规则并写到那个目录）。
+P0 阶段**不启用远程更新**，先把规则文件随包/随工作流分发。
+
+### 3.4 更新机制（`update.js`）
+
+- 原做法：指令启用时 `httpGet(raw.githubusercontent.com/...)` → `eval` → 增量合并规则。
+- vFlow 侧可行：`vflow.network.http_request` 或 `vflow.system.js` 里直接用 `java.net.URL`。
+- ⚠️ **P0 不做**：远程更新引入「配置被清理 / 版本不匹配」的一整类问题，
+  且 `update.js` 里大量路径假设（§3.3）需要一并改。**留到 P2**。
+
+---
+
+## 4. 缺口与方案
+
+### 4.1 缺口 1：超级岛通知
+
+**现状**（已核实）：岛装配层 `services/island/` 是 `internal object`，
+`IslandNotificationDispatcher.dispatch` 的**生产调用点只有执行进度通知那 2 处**，
+用户**无法在工作流里主动推一条自定义岛通知**。
+
+**但要先纠正一个误解**：脚本里的岛通知（`core.js:1974-2150`）
+**根本没用任何平台专有 API** —— 它是：
+
+```javascript
+var builder = new NotificationBuilder(context, channelId)   // 公开 API
+    .setContentTitle(title).setContentText(content)…;
+notification.extras.putString("miui.focus.param", islandParams);  // 公开 extras
+NotificationManager.notify(notificationId, notification);         // 公开 API
+```
+
+⇒ **用 `vflow.system.js` 完全可以直接做**（`script-system-overview.md:398-404` 的实测判定：
+「超级岛 ✅ 能 —— 就是 `NotificationManager.notify()` + `notification.extras.putString("miui.focus.param", json)`，
+**公开 Notification API，无特权要求**」）。
+
+⇒ **两条路线**：
+
+| 路线 | 做法 | 成本 | 建议 |
+|---|---|---|---|
+| **A（P0 采用）** | 岛通知**写在脚本里**，用 `vflow.system.js` 直接 `notify` | **0 行 Kotlin** | ✅ 先跑通链路 |
+| **B（P1 可选）** | 新增 `vflow.notification.island` 模块，复用现有 `IslandParamsBuilder` | 1 个模块 + 注册 + 三语文案 | 想让「岛」成为**通用可编排能力**时再做 |
+
+⚠️ 路线 A 的代价：**岛参数 JSON 要脚本自己拼**，与 vFlow 的 `IslandParamsBuilder`
+（`IslandParamsBuilder.kt` 279 行，含能力探测、`param_v2` 结构、图标装配）是**两份实现**。
+本仓库对「两份实现」有明确教训（`FORK.md` 记过 logcat 双份的代价：**改一处忘另一处，表现是静默不一致**）。
+⇒ 若 P0 用 A 跑通、P1 要转 B，**必须把脚本里那份删掉**，不能两份并存。
+
+**关于路线 B 的一个待核实点**：`IslandParamsBuilder` 目前产出的 `param_v2` 结构是
+**为「执行进度」设计的**（含 `stepName` / `progressText` / 状态胶囊）。
+而脚本用的是**「信息展示为主」**（`islandProperty: 1`、`bigIslandArea.imageTextInfoLeft` + `textInfo`、
+`actions[0].actionTitle` 一个按钮）。**两者是同一协议的不同业务形态**，
+⇒ 做 B 之前要先确认 `IslandParamsBuilder` 能否表达脚本那种形状（**未核实，列为未决项**）。
+
+### 4.2 缺口 2：小窗打开（**vFlow 已有可行路径**）
+
+**原脚本做法**（`core.js:1704-1790`，【源码直读】）：直接构造 `ActivityOptions`：
+
+```javascript
+var options = ActivityOptions.makeBasic();
+options.setLaunchWindowingMode(useMode);              // useMode = 5（freeform）
+options.setLaunchBounds(new Rect(left, top, right, bottom));
+context.startActivityAsUser(intent, options.toBundle(), userHandle);
+```
+
+**vFlow 侧为什么不能照抄**：`setLaunchWindowingMode` / `setLaunchBounds` 是 **`@hide` API**，
+App 进程（UID 10684）受限；且 `ActivityOptions` 需要构造 `Rect` 对象参数，
+**shell 的 `service call` 传不了对象**（`script-system-overview.md:334-357`）。
+
+**已验证的绕过路径**（`script-system-overview.md:408-455`，**已实测**）：
+
+```bash
+TID=$(dumpsys activity activities | grep -m1 'topResumedActivity' | grep -oE ' t[0-9]+' | tr -d ' t')
+service call activity_task 138 i32 $TID i32 $flag s16 '' i32 0
+# 138 = launchMiniFreeFormWindowVersion2 的事务码（MIUI 私有 AIDL）
+```
+
+```javascript
+var r = vflow.shizuku.shell_command({ mode: 'auto', command: cmd });
+```
+
+⚠️ **诚实标注的代价**（同文档 §6.2）：
+- **事务码 `138` 硬编码**：系统升级可能变（失效时由 `mode=freeform` 回读报 FAIL，**不会静默**）
+- 依赖 `dumpsys` 输出格式
+- 依赖 Shizuku / Root
+- `launchMiniFreeFormWindowVersion2` 是 **MIUI / 澎湃私有接口**（本项目的目标机型恰好是）
+
+⇒ **小窗可用，但只有「目标机型是小米 + 装了 Shizuku」这一条路**。
+非小米机型应**降级为全屏**（原脚本已有类似判断，`core.js:1765`）。
+
+### 4.3 缺口 3：正则替换（**一行可补，建议补**）
+
+脚本用 `ReplaceRegex` 做了两件事：
+1. **清理输入**（`{\|}\|\`\|\\` → 空格，见规则 JSON 的 action 1/2）
+2. 规则匹配内部的正则替换（`replaceAll`，`core.js:1326`，是**脚本自己实现的**，不依赖平台）
+
+第 2 类**不受影响**（纯 JS）。第 1 类在 vFlow 里的替代：
+
+| 方案 | 成本 |
+|---|---|
+| 用 `vflow.system.js` 写 `text.replace(/[{}`\\]/g, " ")` | **0 行 Kotlin**，P0 采用 |
+| 给 `vflow.data.text_replace` 加一个「正则模式」开关 | 改上游模块（diff 面积小，但要动 `InputDefinition` + 执行分支） |
+
+⇒ **P0 用脚本；若后续发现脚本里正则替换用得频繁，再考虑给模块加开关**（不在必做项）。
+
+### 4.4 明确不做：选中文本菜单触发器
+
+- **用户判定**：在原平台里从未用过，且实测长按选中**没有反应**（该路径大概率已失效）。
+- **vFlow 侧成本**（若要做）：需要新增一个 Xposed hook source
+  （hook `android.widget.Editor` 或 system_server 侧的选中事件），
+  涉及 `HookTargets.kt` 登记 + `xposed/sources/` 新增 Source + `wire/` 事件信封 + 触发器模块 + Handler + 两处注册。
+  **这是本项目里最大的一块新增基础设施**，而它对应的功能**用户不用**。
+- ⇒ **本项目不做**。若将来需要，按 `docs/fork/xposed-architecture-v2.md` §3.4.3 的
+  「新增 hook 触发器 = 框架 + 适配器」姿势单独评估。
+
+### 4.5 明确不新增：错误弹窗模块
+
+- 脚本的 `ShowAlertDialog` 只用在**一个地方**：`core.js` 尾部的错误分支
+  （「运行中的错误：…」+「复制日志」按钮）。
+- **用户判定**：这不是缺口 ——「我们有很多可以替代的 vFlow，直接 toast 或者静默也行」。
+- **替代方案**：
+  - `vflow.device.toast`（`ToastModule.kt:21`）—— 轻量提示
+  - `vflow.data.log`（`LogModule.kt`，本仓库新增）—— 写进工作流日志
+  - **推荐两者都用**：日志留痕（可事后查）+ Toast 提示（当场可见）
+- ⚠️ **不要为此新增「通用对话框模块」**。vFlow 已有 `vflow.data.quick_view` /
+  `vflow.data.input` / `vflow.logic.list.choose` 三种专用弹窗，
+  再加一个「任意标题+正文+按钮」的通用对话框是**为单个脚本的单个错误分支造基础设施**。
+
+> 📌 顺带记一处**现状观察**（非本项目引入）：`UiBlockDefinitions.kt:17-20` 定义了
+> `DIALOG_PAIRING` / `vflow.ui.dialog.start|show|end` 三个常量，但**全仓无对应类实现、也未注册**
+> （`ModuleRegistry.kt:293-299` 只注册了 Activity 与悬浮窗，注释里却写着「Activity / 悬浮窗 / 对话框」）。
+> ⇒ 这是一处**预留但未落地**的 ID。本项目**不动它**，但登记在此以免后来者以为它可用。
+
+### 4.6 实测结论：`vflow.system.js` 里**不能 `new` 抽象类**（2026-10-07 真机）
+
+> 这一节是**上真机之后才发现的**，设计阶段完全没预料到。它是本项目 P0 的**头号阻塞项**。
+>
+> ⚠️ **本节经历过一次结论更正**：初稿把真因写成「ART 的 `PathClassLoader` 没有 `defineClass`，
+> App 进程无法运行时定义类」——**那是错的**。核对 ShortX 的 `com.faendir:rhino-android`
+> 源码后发现：**真因是 vFlow 少覆写了 `ContextFactory.createClassLoader` 这一层**。
+> 更正过程见下面的「为什么走不通」小节（保留原文以记录这次误判）。
+
+#### 现象
+
+脚本跑到 `core.js` 的岛通知函数时**报错退出**：
+
+```
+E WorkflowExecutor: 模块执行失败: JavaScript脚本执行失败 -
+  JavaScript Error at line 2157: 0: 实例化错误 (can't load this type of class file)：
+  类 android.content.BroadcastReceiver 是接口或抽象类
+```
+
+`core.js:2008` 的写法是 Rhino 的**经典「new + 字面量」子类化**：
+
+```javascript
+var receiver = new BroadcastReceiver({           // ← 这一行炸
+    onReceive: function (context, intent) { … }
+});
+```
+
+#### 实测矩阵（真机，逐条隔离跑，不是推断）
+
+| # | 写法 | 结果 |
+|---|---|---|
+| 1 | `typeof JavaAdapter` | ✅ `function`（对象存在） |
+| 2 | `new` **接口**（`View.OnClickListener`） | ✅ 成功（`cls` = `$Proxy6`，动态代理） |
+| 3 | `JavaAdapter(接口, {...})` | ❌ `can't load this type of class file` |
+| 4 | `new` **抽象类**（`BroadcastReceiver`） | ❌ **同一条报错** |
+| 5 | `JavaAdapter(抽象类, {...})` | ❌ 同一条报错 |
+| 6 | `new` **具体类**（`java.util.ArrayList` / `java.lang.Thread`） | ⚠️ **看情况**：`Thread` 跑得通但**没生成子类**；`ArrayList` 直接 NPE |
+| 7 | `new java.lang.Thread({run: …})` | ⚠️ `run()` 被调用，但 `getClass().getName()` 仍是 `java.lang.Thread` |
+
+⇒ **规律**：
+- **接口** ✅ 可靠（`java.lang.reflect.Proxy`，**不需要定义新类**）
+- **具体类** ⚠️ **不是真的子类化**（类名没变），且换一个类就可能崩 —— **不可依赖**
+- **抽象类** ❌ 必然失败（需要生成真子类 ⇒ 撞上 `defineClass`）
+
+#### 为什么走不通（机制）—— **不是 ART 的限制，是 vFlow 少配了一层**
+
+> ⚠️ 本节初稿曾写成「ART 的 `PathClassLoader` 没有 `defineClass`，所以 App 进程无法运行时定义类」。
+> **那个说法是错的** —— ShortX 在同样的 ART 上跑通了同一个脚本。以下是**核对过两边的字节码与源码**之后的结论。
+
+**Rhino 的类加载链**（`javap` 逐层核实）：
+
+```
+Context.enter()
+  └─ Context.createClassLoader(parent)          // 转发给 factory
+       └─ ContextFactory.createClassLoader(parent)   // ← 可覆写点
+            └─ 默认返回 DefiningClassLoader
+                 └─ defineClass() → ClassLoader.defineClass(String, byte[], int, int, ProtectionDomain)
+```
+
+`DefiningClassLoader` 调的是 **`java.lang.ClassLoader.defineClass`**（`javap` 已确认字节码）。
+那是 **JVM 的类定义入口**，在 ART 上对 App 的 `PathClassLoader` 调用**必然抛**
+`can't load this type of class file` —— 因为 ART 只认 **dex**，不认 `.class`。
+
+**关键在这里**：`ContextFactory.createClassLoader` 是 **`protected` 且可覆写**的。
+
+| | ShortX | vFlow |
+|---|---|---|
+| Rhino 库 | `com.faendir:rhino-android` | `org.mozilla:rhino:1.9.0`（裸库） |
+| `ContextFactory` | `AndroidContextFactory`（**覆写了 `createClassLoader`**） | `JsTimeoutContextFactory`（**只覆写 `observeInstructionCount`**） |
+| 返回的 `GeneratedClassLoader` | `InMemoryAndroidClassLoader` | Rhino 默认的 `DefiningClassLoader` |
+| `defineClass` 的实现 | **`.class` → dex 翻译后再加载**（见下） | `ClassLoader.defineClass`（ART 上无效） |
+
+`rhino-android` 的做法（源码直读，`BaseAndroidClassLoader.java`）：
+
+```java
+public Class<?> defineClass(String name, byte[] data) {
+    DexOptions dexOptions = new DexOptions();
+    DexFile dexFile = new DexFile(dexOptions);
+    DirectClassFile classFile = new DirectClassFile(data, name.replace('.', '/') + ".class", true);
+    …
+    dexFile.add(CfTranslator.translate(context, classFile, null, new CfOptions(), dexOptions, dexFile));
+    Dex dex = new Dex(dexFile.toDex(null, false));
+    …
+    return loadClass(dex, name);     // → new InMemoryDexClassLoader(ByteBuffer.wrap(dex.getBytes()), parent)
+}
+```
+
+即：**把 Rhino 生成的 `.class` 字节码用 `dx`（`com.android.dx`）翻译成 dex，
+再用 `InMemoryDexClassLoader` 从内存加载。** 这条链在 ART 上成立。
+
+⇒ **真因是「vFlow 没有覆写 `createClassLoader`」**，而不是「ART 做不到」。
+**vFlow 的 `JsTimeoutContextFactory` 只覆写了超时回调，类加载那一层直接落回了 JVM 版实现。**
+
+#### 附带发现：**具体类的「子类化」也不可靠**（实测）
+
+实测矩阵的第 6/7 条（`new ArrayList({...})` / `new Thread({run})`）**看着成功，其实不是真的子类化**：
+
+| 探测 | 结果 |
+|---|---|
+| `var t = new java.lang.Thread({run:function(){called=true;}}); t.run();` | ✅ `called=true`，但 `t.getClass().getName()` = **`java.lang.Thread`**（不是生成的子类） |
+| `var o = new java.util.ArrayList({size:function(){return 999;}})` | ❌ `Wrapped java.lang.NullPointerException: Attempt to get length of null array` |
+| `var l = new android.view.View.OnClickListener({onClick:...})` | ✅ `hit=true`，`cls` = **`$Proxy6`**（`java.lang.reflect.Proxy` 动态代理） |
+
+⇒ 三类的真实情况：
+
+| 类别 | 机制 | 可靠性 |
+|---|---|---|
+| **接口** | `java.lang.reflect.Proxy` 动态代理（**不需要 dex**） | ✅ 可靠 |
+| **具体类** | 走 Rhino 的某条特例路径（**不是子类化**），且**换一个类就可能崩**（`ArrayList` 就崩了） | ⚠️ **不可靠** |
+| **抽象类** | 必须生成真子类 ⇒ 撞上 `defineClass` | ❌ 必然失败 |
+
+⚠️ 这加强了结论：**不是「避开抽象类就行」，而是「这套子类化机制整体不可用」**。
+`core.js` 里凡是「用 JS 字面量实现 Java 接口/抽象类」的地方**都踩在这条不稳的路径上**。
+
+#### 影响面：这**不是「岛通知一条路」的问题**
+
+`core.js` 里**三处**依赖「子类化抽象类 / 用 JavaAdapter」，**每处都带一个功能**：
+
+| 位置 | 依赖 | 功能 | 后果 |
+|---|---|---|---|
+| `core.js:2008` | `new BroadcastReceiver`（**抽象类**） | **岛通知的点击回传**（点岛 → 全屏 / 点按钮 → 小窗） | ❌ **必然抛异常** ⇒ 整条岛路径死 |
+| `core.js:757` | `new View.OnClickListener`（**接口**） | 浮窗的点击 / 滑动 | ✅ 走 `Proxy`，可靠 |
+| `core.js:806` | `new Runnable`（具体类） | 超时线程 | ⚠️ 「碰巧能跑」（实测 `getClass()` 没变），**不属于可靠路径** |
+
+⇒ 眼下**只有岛通知那条路径挂掉**，浮窗那条能跑。
+这也是为什么把 `use_islandNotification` 改成 `false` 后功能立刻正常 —— 见 §7.1 的真机记录。
+
+#### 出路（按推荐度，**已重排**）
+
+> ⚠️ 初稿把「用浮窗替代」列为出路 ①，那是在**误以为 ART 做不到**的前提下写的。
+> 既然真因是「vFlow 少覆写了 `createClassLoader`」，**最省事也最彻底的解是补上那一层**。
+
+| 出路 | 做法 | 代价 / 风险 |
+|---|---|---|
+| **① 给 vFlow 的 `ContextFactory` 覆写 `createClassLoader`（**推荐**）** | 照 `rhino-android` 的做法实现一个 `GeneratedClassLoader`：`.class` → dex（`dx`）→ `InMemoryDexClassLoader`。**不引第三方库，自己写这一层**（`rhino-android` 已 2021 年停更，且它绑 `rhino-runtime:1.7.13`，与 vFlow 的 1.9.0 不同代） | ① 需要 `com.android.tools:r8`（含 `com.android.dx`）作为**运行期依赖** —— ⚠️ **体积**（dx 约 1 MB）；② **同时惠及 App 侧与 hook 侧**（两侧用的是同一套 `ContextFactory` 模式）；③ ⚠️ 这是**改上游核心文件**（`JsTimeout.kt` / 新增文件），按 `FORK.md` 需登记 |
+| **② 用浮窗替代岛（P0 的临时手段）** | 配置 `use_islandNotification=false` | ⚠️ **丢掉超级岛**，退化成 `TYPE_APPLICATION_OVERLAY` 胶囊浮窗。**实测可用**，但不是用户要的形态 |
+| **③ 把点击回传换成「PendingIntent 直接启动 Activity」** | 岛主体点击**已经是** `PendingIntent.getActivity`（`core.js:2041`）；问题只在**按钮**（`getBroadcast` → 需要 receiver）。改成按钮也走 `getActivity` + 中转 Activity | 需新增 Activity；且**只绕开岛这一处**，`core.js` 别处再出现「实现抽象类」还会撞墙 |
+| **④ 走 `vflow.xposed.js`** | hook 侧可以**在 Kotlin 里写固定类**（如 `IslandClickReceiver`）暴露给脚本 | 成本最高，且 hook 侧**同样缺这一层**（见下） |
+
+> ⚠️ **hook 侧也缺**（已核实）：`xposed/script/ScriptSandbox.kt` 的 factory
+> **同样没有覆写 `createClassLoader`** ⇒ 换到 `vflow.xposed.js` 跑**不会自动解决**，
+> 除非同时补那一层（出路 ① 的实现对两侧通用）。
+
+#### 对 P0 的影响
+
+**P0 的目标（「复制 → 识别 → 提示 → 打开」）用浮窗路径已经跑通**（见 §7.1）。
+岛形态的恢复**不阻塞 P0**，但**是用户的核心诉求** ⇒ 列为 P1 第一项（出路 ①）。
+
+---
+
+## 5. 实施计划
+
+> **已与用户确认**：第一个里程碑 = **先跑通单条链路**（不追求一次到位）。
+
+### P0 —— 最小闭环（**已跑通，浮窗形态**）
+
+**目标**：剪贴板复制一条分享文案 → 识别出链接 → 弹出提示 → 点击打开。
+
+| # | 事项 | 状态 |
+|---|---|---|
+| 1 | 建 vFlow 工作流：`vflow.trigger.clipboard` + 标签「剪切板」 | ✅ 走 API 创建（`tools/create-workflow.py`） |
+| 2 | 移植 `core.js`（**改 3 处专有 API + 1 处路径 + 1 处 `factTag`**） | ✅ 5 类补丁，每类带出现次数断言（`src/build.js`） |
+| 3 | 规则库放进 vFlow 可读目录 | ✅ `/sdcard/vFlow/fluid-cloud/` |
+| 4 | `vflow.system.js` 步骤 | ✅ 引导脚本 + `eval`（§7.2） |
+| 5 | 弹提示 | ⚠️ **岛被 §4.6 阻塞，暂用浮窗**（`use_islandNotification=false`） |
+| 6 | 点击 → 打开链接 | ⚠️ 浮窗路径的点击**未单独验**（浮窗弹出后需人工点）；岛路径的点击是阻塞点 |
+
+**P0 验收判据**（真机，逐条对 §7.1）：
+- [x] 复制一条含链接的分享文案 → 浮窗弹出，标题/副标题正确
+- [ ] 点浮窗主体 → 全屏打开链接（**待人工点一次确认**）
+- [x] 规则命中（「打开哔哩哔哩」）
+- [x] `console.log` 输出能在 logcat 里看到（`JsScript: [fluid-cloud] …`）
+- [ ] ~~岛形态~~ —— **被 §4.6 阻塞**，见 P1 第 0 项
+
+### P1 —— 补齐触发源与打开方式
+
+| # | 事项 | 说明 |
+|---|---|---|
+| **0** | ⭐ **补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ①。**这是恢复超级岛形态的前提**，也是本批**唯一要改 vFlow 核心代码**的项 |
+| 7 | QQ / 微信触发源 | `vflow.trigger.activity_changed` + `class_filter` 精确匹配；脚本里改用 `intent_uri` 抠 `S.url=` / `S.rawUrl=` |
+| 8 | 附加插件广播触发源 | `vflow.trigger.broadcast` + `extras_json`；⚠️ 需确认附加插件（`com.nyehueh.fluidcloud`）是否要改，或改用 vFlow 自己的广播 |
+| 9 | 小窗打开 | `service call activity_task 138`（§4.2）；非小米机型降级全屏 |
+| 10 | 选项列表对话框 | 用 `vflow.logic.list.choose` 替代自绘 WindowManager View |
+
+### P2 —— 完整形态
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 11 | 图形化设置页 | 脚本用自绘 `WindowManager` View（`showsettingsui`，`core.js:274-490`）⇒ vFlow 有 `vflow.ui.activity.*` UI 积木可替代，但**工作量不小** |
+| 12 | 规则远程更新 | 移植 `update.js`（§3.4），换路径、去专有依赖 |
+| 13 | （可选）岛通知模块化 | §4.1 路线 B：新增 `vflow.notification.island`，**并把脚本里那份删掉** |
+
+---
+
+## 6. 静默失效点清单
+
+本仓库的核心教训是「**改错了不报错、只静默变差**」。本项目的风险点：
+
+| # | 风险 | 表现 | 防法 |
+|---|---|---|---|
+| 1 | **`factTag` 未接上** | 脚本走错分支 / 全部落空，**不报错** | 脚本开头显式赋值 + 兜底空串；用日志打印实际值 |
+| 2 | **`[[__trigger_label]]` 未设置** | 值是**空串**（不是 `VNull`）⇒ `If` 比较恒 false | 每个触发器都要填标签；未命中时脚本要有默认分支 |
+| 3 | **规则文件路径不可读** | 规则库为空 ⇒ 识别不出任何链接，**表现为「功能没反应」** | 脚本启动时检查文件存在性并**显式报错**（原脚本有 `throw "核心文件不存在"`） |
+| 4 | **`service call 138` 事务码失效** | 小窗静默变成全屏（或失败） | 按 `script-system-overview.md` §6.2 做 `mode=freeform` **回读验证** |
+| 5 | **`vflow.system.js` 无超时生效** | 脚本死循环**永久挂住执行线程**（FORK.md：引擎有超时能力但**两个调用点都不传**） | ⚠️ **本项目直接暴露在这个风险下**（§7 未决项） |
+| 6 | **岛参数两份实现漂移** | 若 P0 脚本内拼 + P1 转模块化，两份 `param_v2` 会不一致 | §4.1：转 B 时**必须删掉脚本那份** |
+| 7 | **Xposed 通道未连接** | `activity_changed` 触发器**静默不触发**（P1 的 QQ/微信源） | 首页有 Xposed 状态卡；`TriggerService` 会显示提示 |
+| 8 | **`extras_json` 被截断** | 广播 extras 超 8 KiB 时 `truncated=true`（`BroadcastTriggerHandler` 的预算） | 检查 `truncated` 输出；附加插件的 URL 通常很短，风险低 |
+
+---
+
+## 7.1 P0 真机验证记录（2026-10-07，小米 MIX Fold 3 / Android 17）
+
+> 设备：`192.168.1.32:38079`（无线调试）。工作流 id `aa070997-fdba-46bd-9ef7-e1fb7a7ac5cf`。
+> 全流程走的是**远程 API**（`tools/create-workflow.py`），没有手工粘贴 —— 见 §7.2。
+
+### ✅ 已通过
+
+| # | 判据 | 证据 |
+|---|---|---|
+| 1 | 引导脚本在 vFlow 里**能跑起来** | `JsScript: [fluid-cloud] 首次运行，已创建配置目录 /sdcard/vFlow/fluid-cloud` |
+| 2 | 完整脚本从设备文件读取并 `eval` 成功 | 后续所有 `core.js` 内部函数都跑到了（`获取用户列表失败` 是 core.js 内部的日志） |
+| 3 | 规则库被读到 | 无「规则库缺失」报错；链接识别产出正确结果 |
+| 4 | **链接识别 + 规则匹配 + 提取码回填** | 浮窗标题显示「打开哔哩哔哩」（规则命中），副标题「点击全屏打开哔哩哔哩」 |
+| 5 | **浮窗真的弹出来了**（截图证据） | 顶部胶囊：B站图标 + 「打开哔哩哔哩 / 点击全屏打开哔哩哔哩」+ 「浮窗打开」按钮 |
+| 6 | 剪贴板触发器接线正确 | `ClipboardTriggerHandler: 触发工作流 '流体云'，事件: clipboard_changed (standard)` |
+| 7 | 端到端全自动（无需人工干预） | 用 API 写剪贴板 → 触发器命中 → 工作流执行 → 浮窗弹出 |
+
+### ❌ 阻塞项（已定位，见 §4.6）
+
+| # | 问题 | 现象 |
+|---|---|---|
+| 1 | **`vflow.system.js` 里不能 `new` 抽象类** | 岛通知路径抛 `can't load this type of class file：类 android.content.BroadcastReceiver 是接口或抽象类` |
+| 2 | 因此**超级岛形态当前用不了** | 只能退化成浮窗（配置 `use_islandNotification=false`） |
+
+**真因（已核实，非推断）**：vFlow 的 `JsTimeoutContextFactory` **没有覆写
+`ContextFactory.createClassLoader`**，于是 Rhino 落回默认的 `DefiningClassLoader`
+（它调 JVM 的 `ClassLoader.defineClass`，在 ART 上无效）。
+ShortX 用 `com.faendir:rhino-android` 覆写了这一层 —— 把 `.class` 用 `dx` 翻成 dex
+再用 `InMemoryDexClassLoader` 加载。**⇒ 补上这一层即可恢复**（P1 第 0 项）。
+
+### ⚠️ 一处**看着像成功、其实是误判**的探测（记下来防重蹈）
+
+第一次探测时把 `new java.lang.Thread({run:…})` 判成「具体类可以子类化」。
+**再探一次发现**：`getClass().getName()` 仍是 `java.lang.Thread` —— **根本没有生成子类**。
+`new java.util.ArrayList({size:…})` 更是直接 NPE。
+
+⇒ 教训：**判据不能只看「调用有没有返回值」**，要看**实际类型**（`getClass()`）。
+这直接影响了 §4.6 的结论排序（把「浮窗替代」从出路 ① 降到 ②）。
+
+### ⚠️ 顺带发现的既有行为（**不是缺陷**，但会误导排查）
+
+| # | 现象 | 说明 |
+|---|---|---|
+| 1 | 第二次写**相同**的剪贴板内容不触发 | `ClipboardTriggerHandler` 有 `lastStandardSignature` 去重（`ClipboardTriggerHandler.kt:57-61`）—— 上游有意设计。**测试时必须换内容** |
+| 2 | `获取用户列表失败: SecurityException: need MANAGE_USERS` | `core.js:1196` 的 `getAllUserIds()` 调 `UserManager.getUsers()`，普通 App 无该权限。**被 core.js 自己的 try/catch 接住**，回落 `[0]`。不影响单用户场景 |
+| 3 | API 执行接口的 `input_variables` 是**死参数** | `ExecutionManager.executeWorkflowInternal` 的签名里有它，**函数体内零引用**（实测 grep）。⇒ 通过 API **无法注入变量**，只能用「写剪贴板 + 触发器」这条真实通路 |
+| 4 | 工作流执行期间再次触发会被忽略 | `WorkflowExecutor` 的 `BLOCK_NEW` 重入策略：`工作流 '流体云' 已在运行，忽略新的执行请求` |
+
+---
+
+## 7.2 为什么最终用「引导脚本 + adb push」
+
+vFlow 远程 API 的请求体上限是 **24 KB**（`BaseHandler.readBody` 的
+`CharArray(contentLength)` + `session.inputStream.reader()`，按字符读 —— 实测边界在
+**body 24065 字节**），而完整脚本是 **113 KB**。
+
+⇒ 直接 POST 完整脚本会：① 服务端读不全 → 截断 → `gson.fromJson` 失败 →
+`400 Invalid request body`；② 更大的 body 会让连接被重置（实测 64 KB 时 `ConnectionResetError`）。
+
+**解法**：工作流里只放 **2 KB 的引导脚本**，它从
+`/sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js` 读完整脚本并 `eval`。
+
+| 好处 | 说明 |
+|---|---|
+| 建/改工作流只需几百字节的 payload | 远低于 24 KB |
+| **改脚本不用改工作流** | `adb push` 覆盖文件即可，API 一次都不用调 |
+| 脚本可在设备上直接看/改 | 路径就在 `/sdcard/vFlow/fluid-cloud/` |
+
+⚠️ **`eval` 必须是「直接 eval 且在最外层」**（不能包 IIFE、不能用 `new Function`）——
+`core.js` 的主入口是它自己的顶层代码，且要能访问 `JsExecutor` 注入的
+`inputs` / `vars` / `context`。详见 `src/bootstrap.js` 的注释。
+
+---
+
+## 7. 未决项
+
+| # | 问题 | 影响 | 何时需要答 | 现状 |
+|---|---|---|---|---|
+| 0 | **岛通知怎么绕开「不能 `new` 抽象类」** | **P0 的头号阻塞项**。见 §4.6 的四条出路 | P1 第一项 | ⚠️ **方向已明**：给 `ContextFactory` 覆写 `createClassLoader`（出路 ①）。**未实施**（P0 暂用浮窗绕过） |
+| 0b | **`com.android.tools:r8` 作运行期依赖的体积代价** | 出路 ① 需要 `dx`（约 1 MB）打进 APK。是否接受？是否只给 `:app` 加、`:core` 不加？ | P1 实施前 | 未答 |
+| 0c | **`rhino-android` 要不要直接用** | 它 2021 年停更、绑 `rhino-runtime:1.7.13`（vFlow 用 1.9.0）⇒ **不建议直接依赖**，倾向自己实现那一层 | P1 实施前 | 倾向**自己写** |
+| 1 | **配置目录放哪** | 决定 §3.3 的全部路径改造 | P0 第 3 步之前 | ✅ **已答**：`/sdcard/vFlow/fluid-cloud/`（实测可读写） |
+| 2 | **`vflow.system.js` 要不要开超时** | 不开则脚本死循环挂线程（§6-5）。但**给 `JsModule` 加超时参数是一次独立的行为变更**（存量脚本会开始失败），FORK.md 明确说要单独评估 | P0 之后、上真机之前 | ⚠️ **真机实测影响有限**：`core.js` 的阻塞点是 `while (result === null) { Thread.sleep(150); }`，有 `timeout` 兜底（默认 3 秒），**不会无限挂**。⇒ 优先级降到 P2 |
+| 3 | **岛通知走 A（脚本内拼）还是 B（新增模块）** | 决定 §4.1 的路线与工作量 | P0 第 5 步之前 | ⚠️ **已被 §4.6 改变前提**：路线 A 在**点击回传**上撞墙 ⇒ 需要先解 #0 |
+| 4 | **`IslandParamsBuilder` 能否表达「信息展示型」岛**（`islandProperty: 1` + 单按钮） | 若不能，路线 B 需要扩框架 | 若选 B | 未核 |
+| 5 | **附加插件（`com.nyehueh.fluidcloud`）是否继续用** | 它是个第三方 APK，通过广播投递 URL。vFlow 已有 `vflow.trigger.broadcast`，**但要确认它是否绑定了原平台的包名** | P1 第 8 步 | 未核 |
+| 6 | **`update.js` 的远程更新要不要保留** | 涉及安全面（远程代码 `eval`）与路径改造量 | P2 | 未核 |
+
+---
+
+## 8. 一句话总结
+
+**这个脚本与原平台的耦合只有 3 处 API 调用 + 1 个短变量 + 1 组路径假设**，
+2000 多行核心逻辑是纯 JS + 公开 Android API；
+**vFlow 侧的 5 条触发源里 4 条已有直接对应物，1 条（选中菜单）用户不用**；
+**真正的缺口只有「小窗」（已有已验证的绕过路径）与「岛通知」（脚本自己就能做）**。
+
+⇒ **可行性高，且不需要先给 vFlow 补任何基础设施。**
