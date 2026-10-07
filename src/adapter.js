@@ -249,12 +249,14 @@ var VFLOW_BOOTSTRAP = (function () {
     }
 
     /**
-     * 规则库：从**随包分发**的文件复制过来（P0 不做远程更新）。
+     * 规则库：**只检查在不在，不负责搬运**。
      *
-     * ⚠️ 源文件路径由构建期注入（`__RULES_SRC__` / `__NOLINKRULES_SRC__` 占位符）。
-     *    这里读的是「同目录下的 rules.json」—— 由 vFlow 工作流的前置步骤或
-     *    手工放到 /sdcard/vFlow/fluid-cloud/ 下。
-     * ⚠️ **规则库缺失时显式抛错** —— 静默的后果是「复制了链接但什么都没发生」，
+     * ⚠️ 规则库（`rules.json` / `nolinkrules.json`）是**部署产物**，由
+     *    `npm run build` 生成在 `dist/`，部署时随完整脚本一起 push 到
+     *    `/sdcard/vFlow/fluid-cloud/`。自举**不生成**它们 ——
+     *    它们由 27 + 2 个源文件合并而来，在设备上凭空造不出来。
+     *
+     * ⚠️ **缺失时显式抛错**：静默的后果是「复制了链接但什么都没发生」，
      *    用户完全无从判断是规则没命中还是功能坏了。
      */
     function ensureRules() {
@@ -264,7 +266,7 @@ var VFLOW_BOOTSTRAP = (function () {
         if (VFLOW_ADAPTER.readText(rulesPath) === null) {
             throw new Error(
                 "规则库缺失：" + rulesPath + "\n" +
-                "请把 fluid-cloud/dist/rules.json 与 nolinkrules.json 复制到 " + FLUID_CLOUD_DIR + "/"
+                "请把 dist/rules.json 与 nolinkrules.json 复制到 " + FLUID_CLOUD_DIR + "/"
             );
         }
         if (VFLOW_ADAPTER.readText(nolinkPath) === null) {

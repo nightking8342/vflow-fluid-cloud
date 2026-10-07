@@ -140,10 +140,13 @@ def main():
     #    `CharArray(contentLength)`，见 DESIGN.md §4.6）。完整脚本 POST 不进去，
     #    会被截断成非法 JSON ⇒ `parseRequestBody` 返回 null ⇒ 400 Invalid request body。
     #    引导脚本改成「从设备文件读完整脚本并 eval」，于是脚本更新只需 adb push。
-    script_path = DIST / "bootstrap.js"
+    #
+    # ⚠️ 引导脚本在 **src/** 下、是个**静态文件**（不是构建产物）——
+    #    架构调整（DESIGN.md §3.5）删掉了它的生成器，内容就是最终要用的东西。
+    script_path = ROOT / "src" / "bootstrap.js"
     full_path = DIST / "vflow-fluid-cloud.js"
     if not script_path.exists():
-        print("缺少 %s —— 先跑 npm run build" % script_path, file=sys.stderr)
+        print("缺少 %s" % script_path, file=sys.stderr)
         sys.exit(1)
 
     script_text = script_path.read_text(encoding="utf-8")

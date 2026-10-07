@@ -2,7 +2,7 @@
 /**
  * 离线测试用例。
  *
- * 跑法：node fluid-cloud/test/run.js
+ * 跑法：npm test（或 node test/run.js）
  *
  * ⚠️ **能测什么、不能测什么** 见 harness.js 的文件头。
  *    这里只覆盖**纯 JS 那一半**（规则匹配 / 链接识别 / 岛参数生成）。
@@ -48,6 +48,32 @@ function assertEq(actual, expected, msg) {
     if (a !== b) {
         throw new Error(`${msg || '值不相等'}\n      实际: ${a}\n      期望: ${b}`);
     }
+}
+
+// 剥掉行注释与块注释，**保留换行**（行号不漂，便于按行断言）。
+//
+// ⚠️ **为什么测试需要它**：本项目的源码里**有意**保留了原平台的痕迹 ——
+//    src/core.js 头部记着「原：shortx.executeAction(ShowToast…)」这类来历说明，
+//    src/adapter.js 记着「上游用 /data/system/shortx* 做配置目录」。
+//    那是**给维护者看的文档**，不是没替换干净的残留。
+//    只做 includes() 的断言会把它们一起判红 —— 而唯一的「修法」是删掉这些说明，
+//    等于**把文档逼走**。⇒ 判据必须是「**代码里**没有残留」。
+//
+// ⚠️⚠️ **不处理字符串字面量与正则字面量**，这是**已知且已核实**的局限：
+//    在当前的 src/core.js + src/adapter.js 上，两者都不会产生误判 ——
+//    - 正则字面量共 7 处，**无一**以块注释起始符或行注释符开头
+//      （正则以 `*` 开头本就是语法错误；以 `//` 开头的写法会被解析成注释，不存在）；
+//    - 字符串字面量里出现的 http 协议前缀不会命中 shortx / Packages.tornaco 这些词。
+//    真正的风险是**将来**有人加一句 var s = "// shortx" 或正则里出现块注释起始符。
+//    届时本函数会**多剥**一点、让断言偏松（**偏松不会误报，只是可能漏报**）——
+//    真的需要精确时再引入 tokenizer，**不要**为了「看起来更严谨」在这里堆半吊子状态机。
+function stripComments(text) {
+    return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+/** 读一个源文件（统一 LF，与 generate.js 的 read() 同口径）。 */
+function readSrc(name) {
+    return fs.readFileSync(path.join(ROOT, 'src', name), 'utf8').replace(/\r\n/g, '\n');
 }
 
 /**
@@ -128,24 +154,81 @@ test('触发器标签为空时打日志（不静默）', () => {
 console.log('\n[2] 补丁完整性（构建期断言的运行时侧核对）');
 // ===========================================================================
 
-test('产物中无 shortx.executeAction / Packages.tornaco / ShortX_Path 残留', () => {
+// ⚠️ 本节的判据分**产物**与**源码**两路，两者都要过：
+//    - 产物（dist/）是真正跑在设备上的东西 ⇒ 必须干净；
+//    - 源码（src/）是维护者改的东西 ⇒ 计数是「改动点没丢」的锚。
+//    只测产物的话，「有人把补丁从 src 删了但 dist 是旧的」测不出来。
+
+test('产物代码中无 shortx.executeAction / Packages.tornaco / ShortX_Path 残留', () => {
+    // ⚠️ **必须剥注释后再断言** —— core.js 头部与 adapter.js 里的 shortx 字样是
+    //    **有意保留的来历说明**（「原：shortx.executeAction(ShowToast…)」），不是残留。
+    //    不剥的话判红，而唯一的「修法」是删掉这些说明 ⇒ 等于把文档逼走。
+    //    详见 stripComments() 的注释。
+    const code = stripComments(scriptText);
     for (const bad of ['shortx.executeAction', 'Packages.tornaco', 'ShortX_Path']) {
-        assert(!scriptText.includes(bad), `产物仍含 ${bad}`);
+        assert(!code.includes(bad), `产物代码仍含 ${bad}`);
     }
 });
 
-test('三处平台 API 已换成 VFLOW_ADAPTER', () => {
+test('「剥注释」没有把断言变成空转', () => {
+    // 防空转：剥完必须还剩足够多的代码，且已知的**注释**确实被剥掉了。
+    const code = stripComments(scriptText);
+    assert(code.length > scriptText.length * 0.8, `剥注释剥过头了：${code.length} / ${scriptText.length}`);
+    assert(!code.includes('[vflow]'), '[vflow] 标记是注释，应被剥掉');
+    assert(!code.includes('来历'), '头部说明是注释，应被剥掉');
+});
+
+test('三处平台 API 已换成 VFLOW_ADAPTER（产物）', () => {
     assert(scriptText.includes('VFLOW_ADAPTER.toast('), 'showToast 未替换');
     assert(scriptText.includes('VFLOW_ADAPTER.setClipboard('), 'CopyText 未替换');
     assert(scriptText.includes('VFLOW_ADAPTER.shell('), 'shell 未替换');
 });
 
+test('三处平台 API 已换成 VFLOW_ADAPTER（源码 src/core.js）', () => {
+    // ⚠️ 与上一条**刻意重复**：架构调整后 dist 是**构建产物**（在 .gitignore 里），
+    //    「产物对」不等于「源码对」—— 有人改 src 忘了重新构建时，上一条仍会绿。
+    const src = stripComments(readSrc('core.js'));
+    assert(src.includes('VFLOW_ADAPTER.toast('), 'src/core.js 的 showToast 未替换');
+    assert(src.includes('VFLOW_ADAPTER.setClipboard('), 'src/core.js 的 CopyText 未替换');
+    assert(src.includes('VFLOW_ADAPTER.shell('), 'src/core.js 的 shell 未替换');
+});
+
+test('产物被两个源文件正确拼起来（分隔标记 + 顺序）', () => {
+    // ⚠️ 分隔标记是 generate.js 与测试之间的**唯一契约**，改了名字这里必须跟着改。
+    const SEP = '// ↓↓↓ 核心逻辑（src/core.js）';
+    const idx = scriptText.indexOf(SEP);
+    assert(idx > 0, `产物缺少分隔标记「${SEP}」—— generate.js 的分隔符改过？`);
+
+    // adapter 必须在前：core.js 的**顶层**就用到 FLUID_CLOUD_DIR / input（见 generate.js 注释）
+    const adapterIdx = scriptText.indexOf('var VFLOW_ADAPTER = (function ()');
+    assert(adapterIdx > 0, '产物里找不到 VFLOW_ADAPTER 定义');
+    assert(adapterIdx < idx, 'adapter 段必须排在 core 段之前');
+});
+
 test('配置路径已换到 FLUID_CLOUD_DIR（core 段 9 处）', () => {
-    // ⚠️ 只数 **core 段** —— adapter.js 里也有 FLUID_CLOUD_DIR 的用法（自举那几处），
-    //    全文件计数会把它们算进来（实测 15 vs 9）。分段是必需的。
-    const corePart = scriptText.split('以下为补丁后的上游 core.js')[1] || '';
+    // ⚠️ 只数 **core 段** —— adapter.js 里也有 FLUID_CLOUD_DIR 的用法（自举那几处，
+    //    实测 6 处），全文件计数会把它们算进来。分段是必需的。
+    const corePart = scriptText.split('// ↓↓↓ 核心逻辑（src/core.js）')[1] || '';
     const n = (corePart.match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
     assertEq(n, 9, 'core 段的配置路径替换数不对');
+});
+
+test('配置路径已换到 FLUID_CLOUD_DIR（adapter 段 6 处）', () => {
+    const adapterPart = scriptText.split('// ↓↓↓ 核心逻辑（src/core.js）')[0] || '';
+    const n = (adapterPart.match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
+    assertEq(n, 6, 'adapter 段的配置路径数不对');
+});
+
+test('两个源文件的配置路径数各自没丢（6 / 9）', () => {
+    // ⚠️ 这是**源码侧**的锚，与上面两条产物侧的分段计数互补：
+    //    产物计数能发现「拼错了」，源码计数能发现「补丁从 src 里丢了但 dist 是旧的」。
+    assertEq((readSrc('adapter.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length, 6, 'src/adapter.js');
+    assertEq((readSrc('core.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length, 9, 'src/core.js');
+});
+
+test('原平台的配置目录路径未在代码里复活', () => {
+    const code = stripComments(scriptText);
+    assert(!code.includes('/data/system/shortx'), '代码里又出现了原平台的配置目录');
 });
 
 // ===========================================================================
@@ -311,6 +394,75 @@ test('含特殊字符的文本不崩', () => {
     const { sandbox } = run({ text: '【】{}`\\|<>《》\n\t"\'\\u0000' });
     const links = sandbox.RecognitionMain(sandbox.input);
     assert(Array.isArray(links));
+});
+
+// ===========================================================================
+console.log('\n[8] 项目结构（架构调整后的不变量）');
+// ===========================================================================
+
+// ⚠️ 本节锁的是 **2026-10-07 架构调整**（DESIGN.md §3.5）之后的形态。
+//    这些不变量**不会因为任何行为测试变红** —— 删掉 reference/、把 build.js 加回来、
+//    或者让 version 与 package.json 漂开，功能照常工作、产物照常跑。
+//    ⇒ 只能在这里钉住。
+
+test('reference/ 存在且含上游参考（架构调整后是「来历记录」，不是同步基线）', () => {
+    const dir = path.join(ROOT, 'reference');
+    assert(fs.existsSync(dir), '缺少 reference/ —— 上游来历记录丢了');
+    assert(fs.existsSync(path.join(dir, 'upstream-core-3.2.3.js')), '缺少上游 core 参考');
+    const ver = fs.readFileSync(path.join(dir, 'upstream-version.txt'), 'utf8').trim();
+    assertEq(ver, '3.2.3', '上游版本记录不对');
+});
+
+test('vendor/ 与 src/build.js 已随架构调整删除', () => {
+    // ⚠️ 反向锁：这两样是「跟上游同步」那套机制的东西。它们**回来**意味着
+    //    有人把架构改回去了 —— 那时 DESIGN.md §3.5 与 AGENTS.md 开头也得一起改。
+    assert(!fs.existsSync(path.join(ROOT, 'vendor')), 'vendor/ 不该存在（已改名 reference/）');
+    assert(!fs.existsSync(path.join(ROOT, 'src', 'build.js')), 'src/build.js 不该存在（补丁已一次性落盘）');
+});
+
+test('src/core.js 是就地维护的源文件（补丁已落盘，改动点有标记）', () => {
+    const core = readSrc('core.js');
+    // 落盘的证据：vflow 侧的替换**已经在源码里**，不是构建期才做
+    assert(core.includes('VFLOW_ADAPTER.toast('), 'core.js 里没有 vflow 侧替换 —— 补丁没落盘？');
+    assert(core.includes('FLUID_CLOUD_DIR + "/config.json"'), 'core.js 里路径没换');
+    // 改动点标记：来历可查（数字是当前值，改了会红 ⇒ 提醒同步文档）
+    const marks = (core.match(/\/\* \[vflow\] \*\//g) || []).length;
+    assertEq(marks, 12, '[vflow] 就地标记数变了 —— 改动点增减后请同步 AGENTS.md/DESIGN.md');
+});
+
+test('version 文件存在且与 package.json 一致', () => {
+    // ⚠️ 两处漂开是**静默**的：设备上的更新机制拿 version 做对比（DESIGN.md §3.4.4），
+    //    package.json 的 version 只是 npm 的元数据。不一致时日志会报出错的版本号。
+    const v = fs.readFileSync(path.join(ROOT, 'version'), 'utf8').trim();
+    assert(/^\d+\.\d+\.\d+$/.test(v), `version 格式不对：${JSON.stringify(v)}`);
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    assertEq(v, pkg.version, 'version 与 package.json 的 version 不一致');
+});
+
+test('bootstrap.js 是静态文件（不是生成器）', () => {
+    const bs = readSrc('bootstrap.js');
+    // 静态文件的特征：它就是**要贴进工作流的那段代码**本身
+    assert(bs.includes('eval(vflowCode)'), 'bootstrap.js 不像引导脚本本体');
+    assert(bs.includes('/sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js'), 'bootstrap.js 里的脚本路径不对');
+    // 生成器的特征：会去写 dist/。有它就说明这是旧版生成器，不是静态文件。
+    assert(!bs.includes('writeFileSync'), 'bootstrap.js 还在写文件 —— 它是生成器，不是静态文件');
+});
+
+test('规则库条数（27 有链接 + 2 无链接）', () => {
+    const count = (d) => fs.readdirSync(path.join(ROOT, 'src', d)).filter((f) => f.endsWith('.json')).length;
+    assertEq(count('rules'), 27, 'src/rules/ 条数不对');
+    assertEq(count('nolinkrules'), 2, 'src/nolinkrules/ 条数不对');
+});
+
+test('package.json 的脚本已跟上架构调整', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const s = pkg.scripts || {};
+    // 反向锁：build 里不该再有 build.js（它已删）
+    assert(!/build\.js/.test(s.build || ''), 'package.json 的 build 仍在调 src/build.js（已删）');
+    assert(/bundle-rules\.js/.test(s.build || ''), 'build 少了合并规则那一步');
+    assert(/generate\.js/.test(s.build || ''), 'build 少了拼接那一步');
+    // check 必须真的跑测试，否则「绿」没有意义
+    assert(/npm test|test\/run\.js/.test(s.check || ''), 'check 没跑测试');
 });
 
 // ===========================================================================

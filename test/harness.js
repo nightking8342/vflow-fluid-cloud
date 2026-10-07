@@ -102,7 +102,9 @@ function javaLike(props) {
  *    看不出是 importClass 的问题 —— 实测踩过一次。
  *
  * ⚠️ JS 里拿不到「传进来的表达式叫什么」，故**先扫源码**取出所有 `importClass(X)` 的
- *    点分路径，再逐个解析成短名挂到沙箱上。`Packages.` 开头的已被 build.js 删掉。
+ *    点分路径，再逐个解析成短名挂到沙箱上。
+ *    （`Packages.tornaco.apps.shortx...` 那 3 行在**移植时**就已从 `src/core.js` 里删掉，
+ *      见 DESIGN.md §3.5 —— 所以正常路径下这里扫不到 `Packages.` 开头的。）
  */
 function installRhinoGlobals(sandbox, scriptText) {
     sandbox.importClass = function () {};
