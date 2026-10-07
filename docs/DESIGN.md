@@ -470,6 +470,41 @@ var r = vflow.shizuku.shell_command({ mode: 'auto', command: cmd });
 ⇒ **小窗可用，但只有「目标机型是小米 + 装了 Shizuku」这一条路**。
 非小米机型应**降级为全屏**（原脚本已有类似判断，`core.js:1765`）。
 
+#### ⭐ 2026-10-07 补：`am start --windowingMode` **也能开小窗**（已真机实测）
+
+上面那条是**让已有 task 变 freeform**（`launchMiniFreeFormWindowVersion2`）；
+**开新 task 时直接指定窗口模式**还有另一条路 —— `am start` 自带的参数：
+
+```bash
+am start --windowingMode 5 -a android.intent.action.VIEW -d "<url>"
+# 5 = WINDOWING_MODE_FREEFORM（全屏是 1）
+```
+
+**实测（小米 MIX Fold 3 / Android 17）**：
+
+| 命令 | 结果 |
+|---|---|
+| `am start --windowingMode 5 -n com.android.settings/.Settings` | ✅ `Task{… mode=freeform …}`（回读确认） |
+| `am start --windowingMode 5 -a VIEW -d https://www.bilibili.com` | ⚠️ 起了，但落到了 **IntentResolver** 的 freeform task（没指定包名，系统在问「用哪个应用打开」） |
+| `am start --windowingMode 5 -a VIEW -d … -p tv.danmaku.bili` | ❌ `unable to resolve Intent`（B 站没注册该 URL 的 filter） |
+| `am start --windowingMode 5 -a VIEW -d … -n <正确的 component>` | ❌ 我给的 component 名不对（`does not exist`）—— **不是这条路的错** |
+
+⇒ **机制成立**（`--windowingMode 5` 确实产出 `mode=freeform` 的 task），
+**但「打开哪个 App 的哪个页面」仍需 `-p` 或 `-n` 给对** —— 而这正是
+`core.js` 的 `matchRules` 已经在算的东西（它产出 `pkg` / `activity`）。
+
+**两条路的关系**：
+
+| | `service call … 138`（§4.2 原文） | `am start --windowingMode 5`（本条） |
+|---|---|---|
+| 作用 | 把**已有** task 变 freeform | **新开**一个 freeform task |
+| 需要 | `dumpsys` 取 taskId + **私有事务码** | 只要包名/component |
+| 机型 | ⚠️ **小米私有** | ⚠️ **未验**（`--windowingMode` 是 AOSP 的 shell 命令参数，但各 ROM 是否放行未测） |
+| 全屏 | 不适用 | 同一条命令把 `5` 换成 `1` |
+
+⚠️ **倾向新路**（命令更短、不依赖私有事务码），但**机型覆盖只有一台设备的数据**
+⇒ **不得当成「通用可行」引用**，跨机型需按 §4.2 那套回读验证再确认。
+
 ### 4.3 缺口 3：正则替换（**一行可补，建议补**）
 
 脚本用 `ReplaceRegex` 做了两件事：
@@ -648,7 +683,7 @@ public Class<?> defineClass(String name, byte[] data) {
 
 | 出路 | 做法 | 代价 / 风险 |
 |---|---|---|
-| **① 按钮的点击回传改成「广播 → vFlow 广播触发器」（推荐先做）** | 脚本**只发广播**，**不再自己当接收方** ⇒ 删掉 `new BroadcastReceiver` 那一整段。工作流里配一个广播触发器来接 | ⚠️ 需在工作流里加触发器与对应步骤；⚠️ 只绕开「点击回传」这一处（见下）。**但换来「不阻塞」** —— 详见下一小节 |
+| **① 把「点击之后做什么」交给工作流（广播 → vFlow 广播触发器）**（推荐先做） | 脚本**只发广播**（`data` 带载荷 + `setPackage` 指 vFlow），**不再自己当接收方** ⇒ 删掉 `new BroadcastReceiver` 那一整段。工作流里配一个广播触发器来接，并由**工作流**执行打开 | ⚠️ 需在工作流里加触发器与对应步骤；⚠️ **只覆盖「终结动作」**，多链接/打开方式那类**选择**要一并搬进工作流（见下）。**换来「不阻塞」** —— 详见下一小节 |
 | **② 给 vFlow 的 `ContextFactory` 覆写 `createClassLoader`（**根治**）** | 照 `rhino-android` 的做法实现一个 `GeneratedClassLoader`：`.class` → dex（`dx`）→ `InMemoryDexClassLoader`。**不引第三方库，自己写这一层**（`rhino-android` 已 2021 年停更，且它绑 `rhino-runtime:1.7.13`，与 vFlow 的 1.9.0 不同代） | ① 需要 `com.android.tools:r8`（含 `com.android.dx`）作为**运行期依赖** —— ⚠️ **体积**（dx 约 1 MB）；② **同时惠及 App 侧与 hook 侧**（两侧用的是同一套 `ContextFactory` 模式）；③ ⚠️ 这是**改上游核心文件**（`JsTimeout.kt` / 新增文件），按 `FORK.md` 需登记 |
 | **③ 用浮窗替代岛（P0 的临时手段）** | 配置 `use_islandNotification=false` | ⚠️ **丢掉超级岛**，退化成 `TYPE_APPLICATION_OVERLAY` 胶囊浮窗。**实测可用**，但不是用户要的形态 |
 | **④ 走 `vflow.xposed.js`** | hook 侧可以**在 Kotlin 里写固定类**（如 `IslandClickReceiver`）暴露给脚本 | 成本最高，且 hook 侧**同样缺这一层**（见下） |
@@ -657,7 +692,12 @@ public Class<?> defineClass(String name, byte[] data) {
 > **同样没有覆写 `createClassLoader`** ⇒ 换到 `vflow.xposed.js` 跑**不会自动解决**，
 > 除非同时补那一层（出路 ② 的实现对两侧通用）。
 
-#### ⭐ 出路 ①：把按钮的点击**回传**改成「广播 → vFlow 广播触发器」（**2026-10-07 定案，未实现**）
+#### ⭐ 出路 ①：把「点击之后做什么」交给工作流（广播 → vFlow 广播触发器）（**2026-10-07 定案，未实现**）
+
+> ⚠️ **标题里的「回传」二字后来去掉了** —— 用户 2026-10-07 追问「多链接怎么还走广播了」
+> 之后，才看清这条路**不是「回传」**（回传是 B 类交互，做不到），
+> 而是**把动作的执行权交给工作流**。措辞差别很大：前者暗示「脚本还在等」，
+> 后者说明**脚本已经退场**。
 
 > ⚠️ **本节取代了初稿的「中转 Activity」方案。** 初稿写的是「按钮也走
 > `PendingIntent.getActivity` + 新增一个中转 Activity」，**用户否掉了**
@@ -688,7 +728,7 @@ public Class<?> defineClass(String name, byte[] data) {
 
 | 职责 | 内容 |
 |---|---|
-| **点击回传** | 收到 `ACTION_CLICK_MAIN` / `ACTION_CLICK_BUTTON` ⇒ 写 `result` |
+| **点击回传** | 收到 `ACTION_CLICK_MAIN` / `ACTION_CLICK_BUTTON` ⇒ 写 `result`（**脚本还在等**） |
 | **决策 + 执行** | 等 `result` 非空 ⇒ `openWith.openact` 分流全屏 / 小窗 |
 
 而**它本来就不是必须的**：按钮的 `PendingIntent` 是 `getBroadcast`（`core.js:1906`），
@@ -737,18 +777,63 @@ public Class<?> defineClass(String name, byte[] data) {
 ⚠️ 原实现带后缀是有原因的（避免与上一次的点击串台）。改成固定 action 后，
 这个「串台」问题**必须由契约 C 解决** —— 而不是靠 extras（见下）。
 
-**契约 B：extras 里的内容必须能定位到「哪一次」**。
+**契约 B：点击时「要做什么」必须跟着广播走，不能靠「最近一次」。**
 
 固定 action ⇒ 无法从 action 区分是哪一次岛。而**「用最近一次识别的结果」是错的** ——
 用户完全可能先看到 A 的岛、不点，再复制 B 触发第二个岛，然后回头点 A。
-⇒ 脚本要把**这次的全部决策信息**（链接、方式、包名…）塞进 extras，
+⇒ 脚本要把**这次的全部决策信息**（链接、方式、包名…）随广播发出去，
 工作流直接用它，**不查任何「最近一次」状态**。
 
-> ⚠️ **这一条决定了 extras 的字段设计**，而字段设计又决定了
-> **工作流里怎么把它们取出来拼命令** —— 两者必须一起定，不能只做一半。
-
 ⚠️ **现在是一个 extras 都没有**（`core.js:1905-1906` 只 `new Intent(action)`）——
-数据全在脚本的闭包变量（`opts` / `result`）里。⇒ **加 extras 是本次新增的要求，不是「搬一下」。**
+数据全在脚本的闭包变量（`opts` / `result`）里。⇒ **这是本次新增的要求，不是「搬一下」。**
+
+##### ⭐ 载体选型：**放 `data`（URI），不放 `extras`**
+
+用户 2026-10-07 提的：「能放广播的 data 里面吗」。**能，而且更好。** 三条理由：
+
+| # | 理由 | 依据 |
+|---|---|---|
+| 1 | **`extras` 有 8 KiB 预算、`data` 没有** | `BroadcastTriggerHandler.kt:106` 的 `MAX_EXTRAS_JSON_BYTES = 8 * 1024`；而 `dataUri = intent.dataString`（`:365`）**原样输出、无预算** |
+| 2 | **能精确指定接收者** | `setPackage("<vFlow 包名>")` —— `data` 不变（URI 是给**工作流**看的），package 是给**系统**看的，两者独立。⇒ 把「任意 App 可伪造」收窄成「必须知道包名 + action + URI 形状」 |
+| 3 | **`data` 支持 `addDataScheme` 精确过滤** | 正好卡掉别的 App 发来的同 action 广播 |
+
+⚠️ **`setPackage` 是本方案里唯一需要「知道 vFlow 包名」的地方** ——
+而脚本本来就跑在 vFlow 里，`context.getPackageName()` 直接就有（`core.js:2032`
+已经在用 `context.getPackageName()` 了）。**不是硬编码。**
+
+**载荷形状**（`vflowfc://` 这个 scheme 是新的，不会与别的广播撞）：
+
+```
+vflowfc://click?act=window&pkg=tv.danmaku.bili&uid=0&type=url&url=<encodeURIComponent(原始链接)>
+```
+
+| 参数 | 来自 | 说明 |
+|---|---|---|
+| `act` | `openWith.openact` | `fullscreen` / `window` |
+| `pkg` | `openWith.pkg` | 目标包名 |
+| `uid` | `openWith.UserId` | 多用户 |
+| `type` | `openWith.type` | `url` / `intent`（决定 `url` 怎么解析） |
+| `url` | `openWith.urlsharme` | ⚠️ **必须 `encodeURIComponent`** |
+
+⚠️ **`url` 必须编码**：链接里**本来就有 `?` 与 `&`**（如
+`https://…/video/BV1xx?share_source=copy_web&vd_source=…`），
+不编码会被 URI 解析器**吃掉**（`&` 之后的段变成新的 query 参数）。
+`encodeURIComponent` 的代价很小 —— 实测一条 92 字节的链接编成 110 字节（**1.20×**），
+而它换来的是「解析绝不会错」。脚本侧 `encodeURIComponent` / 工作流侧
+`vflow.data.url_codec`（decode）**一对现成函数**。
+
+**类型限制**（`ExtrasJsonCodec.putTyped` 只支持 String / Boolean / Int / Long / Float / Double
+/ 各类数组，`:171-230`）⇒ **别把整个 `openWith` 对象塞 extras**，只挑上面五个标量。
+这也是选 `data` 的一个附带好处：URI 里本来就只放字符串。
+
+⚠️ **对照：把 `openWith` 整个塞 extras** —— 实测一条 317 字节，8 KiB 预算下
+**25 倍余量，够用**。所以这不是「extras 装不下」，而是「`data` 在
+精确寻址 + 无预算 + 可 scheme 过滤三件事上都更好」。
+
+**工作流侧怎么取**：广播触发器的 `data_uri` 输出拿到整串 ⇒
+`vflow.data.url_codec` 解码 + `vflow.data.parse_json`（或文本提取）拆出五个字段
+⇒ 拼 `am start` 命令给 `vflow.shizuku.shell_command`（全屏用
+`am start --windowingMode 1`，小窗用 `--windowingMode 5` —— 两者共用一条命令）。
 
 **契约 C（⚠️ 最容易漏的一条）：`PendingIntent` 的 requestCode 必须每条通知不同。**
 
@@ -795,7 +880,7 @@ public Class<?> defineClass(String name, byte[] data) {
 （`core.js:1976`）。默认 `Fluid_Cloud_timeout = 3000`（`adapter.js:208`）
 ⇒ **每次触发都把工作流线程占住 3 秒**（点了按钮则提前结束）。
 
-改成广播回传后，脚本**弹完就返回** ⇒ 工作流立刻结束。
+改成「动作交给工作流」之后，脚本**弹完就返回** ⇒ 工作流立刻结束。
 
 ⚠️ **代价是「超时兜底」要重新想**：原实现到点（默认 3 秒）会
 `NotificationManager.cancel(notificationId)` 自动收岛（`core.js:1963-1971`）。
@@ -807,25 +892,67 @@ public Class<?> defineClass(String name, byte[] data) {
 | 交给岛自己的超时（`islandTimeout`，`core.js:2001` 已写 `10`） | ⚠️ **未验证岛到点会不会自己消失** |
 | 干脆不收（通知常驻到用户点或划掉） | 观感变差，但**行为可预测** |
 
+##### ⚠️⚠️ 但这条路**只对「一次点击 = 一个终结动作」的场景成立**
+
+**这是本方案真正的边界，必须先说清楚** —— 否则会以为「把岛的通知路径改掉就行了」。
+
+`core.js` 里**有两类交互**，它们的性质完全不同：
+
+| 类别 | 例子 | 点击后要做什么 | 广播方案适用？ |
+|---|---|---|---|
+| **A. 终结动作** | 岛上的**按钮**（「浮窗打开」） | 打开一个链接，**然后结束** | ✅ **适用** —— 工作流接了就能干完 |
+| **B. 交互回合** | **多链接选择框**（`showOptionsDialog(AllLinks, "选择链接")`，`core.js:2185`）<br>**打开方式选择框**（`core.js:1782` / `:2270`）<br>**「其他打开方式」二级框**（`core.js:2317`）<br>**识别模式选择**（`core.js:1681`） | 用户选一项 ⇒ **脚本还要拿这个结果继续跑**（`matchRules` → 再弹框 → 最后才 `launchWithMode`） | ❌ **不适用** |
+
+**为什么 B 类不能照搬**：那些框的点击是**脚本自己画的浮窗上的 `View.OnClickListener`**
+（`core.js:874`，`new View.OnClickListener` —— **接口，走 `Proxy`，本来就不炸**），
+结果**直接写回脚本的局部变量 `result`**。而广播是**跨进程**的 ——
+工作流接住点击之后，**没法把结果塞回那段已经返回的脚本**。
+
+⇒ **B 类的选择是「在哪儿做」的问题，不是「怎么回传」的问题**（见下）。
+
+##### 那 B 类怎么办：**把选择也挪进工作流**
+
+⭐ **这正是用户 2026-10-07 提的「单独搞一个广播触发器的工作流」的意义** ——
+它不只是「接一个按钮」，而是**把整段交互搬出脚本**：
+
+| 环节 | 现在（脚本内） | 改后（工作流内） |
+|---|---|---|
+| 识别链接 | 脚本 | 脚本（**照旧**，识别是纯计算） |
+| **弹什么、选什么** | 脚本自绘 `WindowManager` 浮窗 + 阻塞等待 | **工作流模块**：`vflow.logic.list.choose`（选项列表）、`vflow.ui.*` 那套 UI 积木 |
+| 用户选完 | 写回脚本的 `result`，脚本继续跑 | **工作流继续往下走**（`If` / 分支），**不需要回传** |
+| 打开 | 脚本调 `launchWithMode` | 工作流调 `am start` |
+
+⚠️ **这个搬法的前提是「选择之后要做的事，工作流能表达」** ——
+本项目恰好成立：选择之后的动作就是「打开某个链接」（`launchWithMode`），
+而它已经被 §4.2 的方案简化为**一条 `am start` 命令**（见下）。
+⇒ **不需要把 2400 行脚本逻辑搬进工作流，只需要搬「选择」这一步。**
+
+⚠️ **不成立的反例（别硬搬）**：若某个选择之后要跑的**是脚本里的大段逻辑**
+（比如「重新识别」——它要重新走一遍 `RecognitionMain` + 再弹框），
+那就得让工作流**再触发一次脚本执行**（而 `BLOCK_NEW` 重入策略会忽略这次触发，
+见「已知限制」表）。⇒ **「重新识别」这一类按钮不适合直接照搬，需单独设计。**
+
 ##### ⚠️ 已知限制（如实记录）
 
 | 限制 | 说明 |
 |---|---|
-| **只绕开「点击回传」这一处** | 岛/浮窗的**构造**部分（`Notification.Builder` / `PendingIntent` / `Icon` / `Bundle`）**不涉及子类化**，本来就没问题；而 `core.js` 别处若再出现「实现抽象类」仍会撞墙（根治要出路 ②） |
-| **需要 Shizuku / Root** | 广播触发器本身不需要，但**小窗打开**走的是 `service call`（§4.2）⇒ 仍依赖 |
-| **只对「打开方式」这一件事有效** | 「重新识别」这类按钮语义是**重新跑一遍识别**，改成广播后要由工作流再触发一次执行（而 `BLOCK_NEW` 重入策略会**忽略**这次触发 —— 除非工作流改成 `STOP_CURRENT_AND_RUN_NEW` 或 `ALLOW_PARALLEL`，`WorkflowReentryBehavior.kt`） |
-| **跨用户场景** | 原实现用 `createPackageContextAsUser` 取图标（`core.js:1918`），广播本身不跨用户；extras 里要带 `userId` 由工作流侧处理 |
+| **只覆盖「终结动作」** | 见上一小节的 A / B 两类。B 类（多链接选择 / 打开方式选择）**不能靠回传**，得把选择本身搬进工作流 |
+| **只绕开「岛这一处」的子类化** | 岛/浮窗的**构造**部分（`Notification.Builder` / `PendingIntent` / `Icon` / `Bundle`）**不涉及子类化**，本来就没问题；而 `core.js` 别处若再出现「实现抽象类」仍会撞墙（根治要出路 ②） |
+| **需要 Shizuku / Root** | 广播触发器本身不需要，但**打开链接**走的是 `am start`（§4.2 的 shell 通道）⇒ 仍依赖 |
+| **`setPackage` 要填对包名** | 填错 ⇒ 广播**发不出去**（`FLAG_EXCLUDE_STOPPED_PACKAGES` 之类不会兜底）。⚠️ 用 `context.getPackageName()` 而不是硬编码 |
+| **跨用户场景** | 原实现用 `createPackageContextAsUser` 取图标（`core.js:1918`），广播本身不跨用户；`data` 里带 `uid` 由工作流侧处理 |
+| **`am start --windowingMode` 的事务语义** | 与 `service call 138` **不同**（一个走 shell 命令、一个走 binder 事务码）。⚠️ **已实测能开小窗**（见 §4.2），但**机型覆盖未验** |
 
 ##### 与出路 ② 的关系
 
 **两者不冲突，且都值得做**：
 
-- **①** 让**岛这条路径立刻能跑**（不依赖改 vFlow）—— 代价是「回传要绕一圈」
+- **①** 让**岛这条路径立刻能跑**（不依赖改 vFlow）—— 代价是「动作执行挪到工作流」
 - **②** 是**根治**（让脚本能子类化抽象类）—— 但**改上游核心文件**（`FORK.md` 要登记）
   + 引入 dx 依赖（约 1 MB）
 
 ⇒ **建议先做 ① 打通岛路径，再评估 ②**。而且 ① 做完之后，
-**② 的优先级会下降** —— 「回传绕一圈」换来的不只是权宜之计，
+**② 的优先级会下降** —— 「动作执行挪到工作流」换来的不只是权宜之计，
 **「不阻塞」本身就是一个改善**（见上）。
 
 #### 对 P0 的影响
@@ -863,7 +990,7 @@ public Class<?> defineClass(String name, byte[] data) {
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **0** | ⭐ **把按钮回传改成「广播 → vFlow 广播触发器」** | 见 §4.6 出路 ①。**恢复超级岛形态的路径**，且**不用改 vFlow**、顺带解决「阻塞 3 秒」 |
+| **0** | ⭐ **把「点击之后做什么」交给工作流（广播 → vFlow 广播触发器）** | 见 §4.6 出路 ①。**恢复超级岛形态的路径**，且**不用改 vFlow**、顺带解决「阻塞 3 秒」。⚠️ 多链接/打开方式那类**选择**要一并搬进工作流 |
 | **0b** | （可选，根治）**补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ②。做完 0 之后**优先级下降**；它是本批**唯一要改 vFlow 核心代码**的项 |
 | 7 | QQ / 微信触发源 | `vflow.trigger.activity_changed` + `class_filter` 精确匹配；脚本里改用 `intent_uri` 抠 `S.url=` / `S.rawUrl=` |
 | 8 | 附加插件广播触发源 | `vflow.trigger.broadcast` + `extras_json`；⚠️ 需确认附加插件（`com.nyehueh.fluidcloud`）是否要改，或改用 vFlow 自己的广播 |
@@ -982,7 +1109,7 @@ vFlow 远程 API 的请求体上限是 **24 KB**（`BaseHandler.readBody` 的
 | 0d | **`rhino-android` 要不要直接用** | 它 2021 年停更、绑 `rhino-runtime:1.7.13`（vFlow 用 1.9.0）⇒ **不建议直接依赖**，倾向自己实现那一层 | 若做出路 ② | 倾向**自己写**（做 ① 则不需要） |
 | 1 | **配置目录放哪** | 决定 §3.3 的全部路径改造 | P0 第 3 步之前 | ✅ **已答**：`/sdcard/vFlow/fluid-cloud/`（实测可读写） |
 | 2 | **`vflow.system.js` 要不要开超时** | 不开则脚本死循环挂线程（§6-5）。但**给 `JsModule` 加超时参数是一次独立的行为变更**（存量脚本会开始失败），FORK.md 明确说要单独评估 | P0 之后、上真机之前 | ⚠️ **真机实测影响有限**：`core.js` 的阻塞点是 `while (result === null) { Thread.sleep(150); }`，有 `timeout` 兜底（默认 3 秒），**不会无限挂**。⇒ 优先级降到 P2 |
-| 3 | **岛通知走 A（脚本内拼）还是 B（新增模块）** | 决定 §4.1 的路线与工作量 | P0 第 5 步之前 | ⚠️ **已被 §4.6 改变前提**：路线 A 在**点击回传**上撞墙 ⇒ 需要先解 #0 |
+| 3 | **岛通知走 A（脚本内拼）还是 B（新增模块）** | 决定 §4.1 的路线与工作量 | P0 第 5 步之前 | ⚠️ **已被 §4.6 改变前提**：路线 A 在**点击处理**上撞墙（`new BroadcastReceiver`）⇒ 需要先解 #0 |
 | 4 | **`IslandParamsBuilder` 能否表达「信息展示型」岛**（`islandProperty: 1` + 单按钮） | 若不能，路线 B 需要扩框架 | 若选 B | 未核 |
 | 5 | **附加插件（`com.nyehueh.fluidcloud`）是否继续用** | 它是个第三方 APK，通过广播投递 URL。vFlow 已有 `vflow.trigger.broadcast`，**但要确认它是否绑定了原平台的包名** | P1 第 8 步 | 未核 |
 | 6 | **脚本更新的源放哪** | 决定 §3.4 能否落地（「不走代理」是硬约束） | 实施 §3.4 前 | ⚠️ **未核**：候选三个（jsDelivr / 自有服务器 / 其他），**必须在目标网络下实测直连**；且 `dist/` 现在不入库，发布形态也待定（§3.4.3） |
