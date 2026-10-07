@@ -668,7 +668,21 @@ public Class<?> defineClass(String name, byte[] data) {
 是因为**脚本想自己当接收方**。而点一下按钮本来就不该由脚本自己处理 ——
 **发送**是脚本的活，**接收**是工作流的活，两者不该挤在同一段脚本里。
 
-##### 现状：按钮回传必须绕一圈
+##### 现状：这条广播长什么样（`core.js:1857-1906`）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 发出者 | `PendingIntent.getBroadcast`（`core.js:1906`） | **由系统在点击时发**，不是脚本主动 `sendBroadcast` |
+| action（主体） | `FLUID_CLOUD_CLICK_MAIN_<notificationId>` | `notificationId` = `System.currentTimeMillis() & 0x7fffffff`（`core.js:1858`） |
+| action（按钮） | `FLUID_CLOUD_CLICK_BUTTON_<notificationId>` | 同上 |
+| **extras** | ⚠️ **一个都没有** | `new Intent(action)`，数据全在**脚本的闭包变量**（`opts` / `result`）里 |
+| package / component | ⚠️ **都没设** ⇒ **隐式广播** | 靠 action 唯一性 + 随机后缀避免被别人匹配到 |
+| requestCode | 主体 `0` / 按钮 `1`（`core.js:1897` / `:1906`） | ⚠️ 写死的 —— 见「契约 C」 |
+| flags | 主体 `FLAG_UPDATE_CURRENT \| FLAG_IMMUTABLE`；按钮只有 `FLAG_IMMUTABLE` | ⚠️ 按钮那个**不含** `UPDATE_CURRENT` |
+| 接收方 | 脚本自己的 `new BroadcastReceiver`（`core.js:1863`） | **这正是撞墙的地方** |
+
+⇒ **改动的实质是「换接收方 + 加 extras」**，不是「换一种广播」——
+**广播本身已经是这条路径的机制**（用户 2026-10-07 指出：原实现走的就是广播）。
 
 `core.js:1863` 的 receiver **同时承担两件事**（这是问题所在）：
 
@@ -698,7 +712,7 @@ public Class<?> defineClass(String name, byte[] data) {
 |---|---|---|
 | 1 | **删掉 `new BroadcastReceiver`**（`core.js:1863`）与 `registerReceiver` | 整段消失 —— 这正是撞墙的地方 |
 | 2 | **删掉 `while (result === null) { Thread.sleep(150); }` 那几处**（`core.js:1976`（岛）/ `:799`（浮窗）/ `:942`（对话框）） | 不再等回传 ⇒ **不再阻塞** |
-| 3 | 按钮的 `PendingIntent` 改成带 **extras** 的显式 action | 把「打开哪个链接 / 全屏还是小窗」装进 extras |
+| 3 | 按钮的 `PendingIntent` 改成**固定 action + 带 extras** | 把「打开哪个链接 / 全屏还是小窗」装进 extras。⚠️ **`requestCode` 必须改成 `notificationId`**（契约 C） |
 | 4 | **清理「超时线程」那一段**（`core.js:1961`） | ⚠️ **容易漏**：它也在 `result` / `unregisterReceiver` 上（`if (result === null)` + `receiverRef.get()`）。receiver 删了之后，这两句的语义全没了 —— 见下 |
 
 ⚠️ **第 4 条不是「顺手清理」，漏了会静默出问题**：那段线程在 `timeout` 之后
@@ -711,7 +725,7 @@ public Class<?> defineClass(String name, byte[] data) {
 （`core.js:1961`，实测矩阵第 6/7 条）。**别指望它能用** ——
 若决定保留超时收岛，先确认它在真机上真的会跑。
 
-##### ⚠️⚠️ 两个必须同时成立的契约（漏任一条都是**静默失效**）
+##### ⚠️⚠️ 三条必须同时成立的契约（漏任一条都是**静默失效**）
 
 **契约 A：脚本发的 action 必须与工作流里配的完全一致。**
 
@@ -721,7 +735,7 @@ public Class<?> defineClass(String name, byte[] data) {
 ⇒ **不能带任何运行期后缀**，必须是**写死的常量**。
 
 ⚠️ 原实现带后缀是有原因的（避免与上一次的点击串台）。改成固定 action 后，
-这个「串台」问题由**别的手段**解决（见契约 B）。
+这个「串台」问题**必须由契约 C 解决** —— 而不是靠 extras（见下）。
 
 **契约 B：extras 里的内容必须能定位到「哪一次」**。
 
@@ -732,6 +746,48 @@ public Class<?> defineClass(String name, byte[] data) {
 
 > ⚠️ **这一条决定了 extras 的字段设计**，而字段设计又决定了
 > **工作流里怎么把它们取出来拼命令** —— 两者必须一起定，不能只做一半。
+
+⚠️ **现在是一个 extras 都没有**（`core.js:1905-1906` 只 `new Intent(action)`）——
+数据全在脚本的闭包变量（`opts` / `result`）里。⇒ **加 extras 是本次新增的要求，不是「搬一下」。**
+
+**契约 C（⚠️ 最容易漏的一条）：`PendingIntent` 的 requestCode 必须每条通知不同。**
+
+`PendingIntent` 的身份是 **`(requestCode, Intent 的 filterEquals)`**，而
+**`filterEquals` 不比较 extras** —— 官方文档逐字：
+
+> *"the PendingIntent will be considered equal to another PendingIntent if the
+> Intent is 'equal' to it (via `Intent.filterEquals`), and the requestCode is the same"*
+
+现在是「action 唯一」⇒ 每条通知的按钮 PendingIntent 天然不同。
+一旦 **action 固定 + requestCode 还是写死的 `1`** ⇒ 第二条通知的 `getBroadcast`
+会**命中第一条**；而没带 `FLAG_UPDATE_CURRENT` 时**旧 extras 原样保留、新的被忽略**
+（`core.js:1906` 用的正是 `FLAG_IMMUTABLE`，不含 `UPDATE_CURRENT`）
+⇒ **点第二条的按钮，打开的是第一条的链接。**
+
+⇒ 解法：**action 固定（契约 A 要求）+ `requestCode` 用 `notificationId`**。
+官方文档给的建议就是这个：
+
+> *"you will need to ensure there is something that is different about them …
+> This may be any of the Intent attributes considered by `Intent.filterEquals`,
+> or different request code integers supplied to … `getBroadcast`"*
+
+⚠️ **这条不会报错、不会崩** —— 表现是「偶尔点错了链接」，而且**只在同时存在两个岛时**才复现。
+单条链路的验收**测不出来**。
+
+##### ⚠️ 新攻击面：接收方从「脚本进程内」变成 `EXPORTED`
+
+现在的广播是**隐式**的（没 `setPackage`）、action 带**随机后缀**
+⇒ 别的 App 基本不可能匹配到（`core.js:1858-1859`）。
+
+改成固定 action + vFlow 的广播触发器之后，接收方是
+`ContextCompat.RECEIVER_EXPORTED`（`BroadcastTriggerHandler.kt:262`）
+⇒ **任何应用都能伪造这条广播**，而 extras 里装的就是「打开哪个链接」。
+
+| 项 | 评估 |
+|---|---|
+| **危害量级** | 约等于「任意 App 自己 `startActivity(ACTION_VIEW)`」⇒ **不新增实质能力** |
+| **何时需要重新评估** | 如果这条工作流里挂的**不只是打开链接**（比如还带副作用步骤），那就成了「任意 App 触发任意工作流」 |
+| **缓解** | ① 把 action 起得足够特异（`com.chaomixian.vflow.fluidcloud.CLICK` 之类）；② 工作流侧对 extras 做白名单校验（只接受已知的 URL 形态）；③ ⚠️ **不要**为此加鉴权层 —— 用户 2026-10-07 已明确否掉广播触发器的鉴权（见 `FORK.md` 的广播触发器条目） |
 
 ##### ✅ 这条路额外买到的东西：**不阻塞**
 
