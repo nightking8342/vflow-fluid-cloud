@@ -210,6 +210,12 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 **当前绕过**：配置里 `use_islandNotification = false`，走浮窗路径（**已真机验证可用**）。
 
+**已定案的恢复路径（2026-10-07，未实现）**：**脚本只发广播、不当接收方** ——
+删掉 `new BroadcastReceiver` 那一整段，按钮的 `PendingIntent` 发一个**固定 action** 的广播
+（extras 带「打开哪个链接 / 全屏还是小窗」），由 **vFlow 的广播触发器**（`vflow.trigger.broadcast`）
+接住并执行打开。**不用改 vFlow，也顺带解决了「阻塞 3 秒」**。
+⚠️ 两个必须同时成立的契约（action 写死 + extras 能定位到哪一次）见 `docs/DESIGN.md` §4.6 出路 ①。
+
 **实测矩阵**（判据是 `getClass().getName()`，不是「有没有返回值」）：
 
 | 类别 | 结果 |

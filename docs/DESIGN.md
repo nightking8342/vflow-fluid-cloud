@@ -620,26 +620,142 @@ public Class<?> defineClass(String name, byte[] data) {
 ⇒ 眼下**只有岛通知那条路径挂掉**，浮窗那条能跑。
 这也是为什么把 `use_islandNotification` 改成 `false` 后功能立刻正常 —— 见 §7.1 的真机记录。
 
-#### 出路（按推荐度，**已重排**）
+#### 出路（按推荐度，**2026-10-07 重排**）
 
-> ⚠️ 初稿把「用浮窗替代」列为出路 ①，那是在**误以为 ART 做不到**的前提下写的。
-> 既然真因是「vFlow 少覆写了 `createClassLoader`」，**最省事也最彻底的解是补上那一层**。
+> ⚠️ 这张表被改过两次，两次都值得记：
+> ① 初稿把「用浮窗替代」列为出路 ①，那是在**误以为 ART 做不到**的前提下写的；
+> ② 初稿的「中转 Activity」被用户否掉（见下），换成「广播 → vFlow 广播触发器」。
 
 | 出路 | 做法 | 代价 / 风险 |
 |---|---|---|
-| **① 给 vFlow 的 `ContextFactory` 覆写 `createClassLoader`（**推荐**）** | 照 `rhino-android` 的做法实现一个 `GeneratedClassLoader`：`.class` → dex（`dx`）→ `InMemoryDexClassLoader`。**不引第三方库，自己写这一层**（`rhino-android` 已 2021 年停更，且它绑 `rhino-runtime:1.7.13`，与 vFlow 的 1.9.0 不同代） | ① 需要 `com.android.tools:r8`（含 `com.android.dx`）作为**运行期依赖** —— ⚠️ **体积**（dx 约 1 MB）；② **同时惠及 App 侧与 hook 侧**（两侧用的是同一套 `ContextFactory` 模式）；③ ⚠️ 这是**改上游核心文件**（`JsTimeout.kt` / 新增文件），按 `FORK.md` 需登记 |
-| **② 用浮窗替代岛（P0 的临时手段）** | 配置 `use_islandNotification=false` | ⚠️ **丢掉超级岛**，退化成 `TYPE_APPLICATION_OVERLAY` 胶囊浮窗。**实测可用**，但不是用户要的形态 |
-| **③ 把点击回传换成「PendingIntent 直接启动 Activity」** | 岛主体点击**已经是** `PendingIntent.getActivity`（`core.js:2041`）；问题只在**按钮**（`getBroadcast` → 需要 receiver）。改成按钮也走 `getActivity` + 中转 Activity | 需新增 Activity；且**只绕开岛这一处**，`core.js` 别处再出现「实现抽象类」还会撞墙 |
+| **① 按钮的点击回传改成「广播 → vFlow 广播触发器」（推荐先做）** | 脚本**只发广播**，**不再自己当接收方** ⇒ 删掉 `new BroadcastReceiver` 那一整段。工作流里配一个广播触发器来接 | ⚠️ 需在工作流里加触发器与对应步骤；⚠️ 只绕开「点击回传」这一处（见下）。**但换来「不阻塞」** —— 详见下一小节 |
+| **② 给 vFlow 的 `ContextFactory` 覆写 `createClassLoader`（**根治**）** | 照 `rhino-android` 的做法实现一个 `GeneratedClassLoader`：`.class` → dex（`dx`）→ `InMemoryDexClassLoader`。**不引第三方库，自己写这一层**（`rhino-android` 已 2021 年停更，且它绑 `rhino-runtime:1.7.13`，与 vFlow 的 1.9.0 不同代） | ① 需要 `com.android.tools:r8`（含 `com.android.dx`）作为**运行期依赖** —— ⚠️ **体积**（dx 约 1 MB）；② **同时惠及 App 侧与 hook 侧**（两侧用的是同一套 `ContextFactory` 模式）；③ ⚠️ 这是**改上游核心文件**（`JsTimeout.kt` / 新增文件），按 `FORK.md` 需登记 |
+| **③ 用浮窗替代岛（P0 的临时手段）** | 配置 `use_islandNotification=false` | ⚠️ **丢掉超级岛**，退化成 `TYPE_APPLICATION_OVERLAY` 胶囊浮窗。**实测可用**，但不是用户要的形态 |
 | **④ 走 `vflow.xposed.js`** | hook 侧可以**在 Kotlin 里写固定类**（如 `IslandClickReceiver`）暴露给脚本 | 成本最高，且 hook 侧**同样缺这一层**（见下） |
 
 > ⚠️ **hook 侧也缺**（已核实）：`xposed/script/ScriptSandbox.kt` 的 factory
 > **同样没有覆写 `createClassLoader`** ⇒ 换到 `vflow.xposed.js` 跑**不会自动解决**，
-> 除非同时补那一层（出路 ① 的实现对两侧通用）。
+> 除非同时补那一层（出路 ② 的实现对两侧通用）。
+
+#### ⭐ 出路 ①：把按钮的点击**回传**改成「广播 → vFlow 广播触发器」（**2026-10-07 定案，未实现**）
+
+> ⚠️ **本节取代了初稿的「中转 Activity」方案。** 初稿写的是「按钮也走
+> `PendingIntent.getActivity` + 新增一个中转 Activity」，**用户否掉了**
+> —— 理由是**根本不需要**：vFlow 里**已经有**广播触发器，而脚本这边只需要
+> **发**一个广播，那不需要 receiver、不需要新增任何 Activity、不需要改 vFlow。
+
+**这条路的立足点是「方向搞反了」**：`new BroadcastReceiver` 之所以炸，
+是因为**脚本想自己当接收方**。而点一下按钮本来就不该由脚本自己处理 ——
+**发送**是脚本的活，**接收**是工作流的活，两者不该挤在同一段脚本里。
+
+##### 现状：按钮回传必须绕一圈
+
+`core.js:1863` 的 receiver **同时承担两件事**（这是问题所在）：
+
+| 职责 | 内容 |
+|---|---|
+| **点击回传** | 收到 `ACTION_CLICK_MAIN` / `ACTION_CLICK_BUTTON` ⇒ 写 `result` |
+| **决策 + 执行** | 等 `result` 非空 ⇒ `openWith.openact` 分流全屏 / 小窗 |
+
+而**它本来就不是必须的**：按钮的 `PendingIntent` 是 `getBroadcast`（`core.js:1906`），
+系统只是**发**一个广播；**谁收**是另一件事 —— 可以是脚本的 receiver，**也可以是 vFlow 的广播触发器**。
+
+##### 改后：三段拆开
+
+```
+① 触发（脚本）：识别出链接 → 弹岛（或浮窗）→ **直接 return，不等待**
+                    按钮 PendingIntent = 一个自定义 action 的广播
+                    extras 带上「打开哪个链接 / 用哪种方式 / 哪个 App」
+
+② 点击（系统）：用户点岛上的按钮 → 系统发那条广播
+
+③ 执行（工作流）：vFlow 的「广播触发」触发器收到 → 工作流里执行打开
+```
+
+**脚本侧只需三处改动**（**都不碰 receiver 那一段，直接删掉**）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | **删掉 `new BroadcastReceiver`**（`core.js:1863`）与 `registerReceiver` | 整段消失 —— 这正是撞墙的地方 |
+| 2 | **删掉 `while (result === null) { Thread.sleep(150); }` 那几处**（`core.js:1976`（岛）/ `:799`（浮窗）/ `:942`（对话框）） | 不再等回传 ⇒ **不再阻塞** |
+| 3 | 按钮的 `PendingIntent` 改成带 **extras** 的显式 action | 把「打开哪个链接 / 全屏还是小窗」装进 extras |
+| 4 | **清理「超时线程」那一段**（`core.js:1961`） | ⚠️ **容易漏**：它也在 `result` / `unregisterReceiver` 上（`if (result === null)` + `receiverRef.get()`）。receiver 删了之后，这两句的语义全没了 —— 见下 |
+
+⚠️ **第 4 条不是「顺手清理」，漏了会静默出问题**：那段线程在 `timeout` 之后
+把 `result` 写成 `"取消"`（`core.js:1964-1966`）。而不再等待之后 `result` 已经没有读者，
+**写它不会报错**（`var result = null` 是个普通局部变量）——
+但 `context.unregisterReceiver(...)` 那两处会**抛**（receiver 已不存在），
+被 `try/catch(e){}` **吞掉**（`core.js:1969-1971`）⇒ 表现是「日志里什么都没有，但那段代码在空转」。
+
+⚠️ **并且它自己就踩在不可靠路径上**：`new Thread(new Runnable({…}))`
+（`core.js:1961`，实测矩阵第 6/7 条）。**别指望它能用** ——
+若决定保留超时收岛，先确认它在真机上真的会跑。
+
+##### ⚠️⚠️ 两个必须同时成立的契约（漏任一条都是**静默失效**）
+
+**契约 A：脚本发的 action 必须与工作流里配的完全一致。**
+
+脚本发的 action 是**运行期拼**的（原实现带 `notificationId` 后缀保证唯一，`core.js:1858`），
+而 `IntentFilter` 里的 action 是**注册期就固定**的（`BroadcastTriggerModule` 的
+`actions` 参数**不接受变量**，见该模块的 `InputDefinition`）。
+⇒ **不能带任何运行期后缀**，必须是**写死的常量**。
+
+⚠️ 原实现带后缀是有原因的（避免与上一次的点击串台）。改成固定 action 后，
+这个「串台」问题由**别的手段**解决（见契约 B）。
+
+**契约 B：extras 里的内容必须能定位到「哪一次」**。
+
+固定 action ⇒ 无法从 action 区分是哪一次岛。而**「用最近一次识别的结果」是错的** ——
+用户完全可能先看到 A 的岛、不点，再复制 B 触发第二个岛，然后回头点 A。
+⇒ 脚本要把**这次的全部决策信息**（链接、方式、包名…）塞进 extras，
+工作流直接用它，**不查任何「最近一次」状态**。
+
+> ⚠️ **这一条决定了 extras 的字段设计**，而字段设计又决定了
+> **工作流里怎么把它们取出来拼命令** —— 两者必须一起定，不能只做一半。
+
+##### ✅ 这条路额外买到的东西：**不阻塞**
+
+现在的岛/浮窗是**同步等待**的：`while (result === null) { Thread.sleep(150); }`
+（`core.js:1976`）。默认 `Fluid_Cloud_timeout = 3000`（`adapter.js:208`）
+⇒ **每次触发都把工作流线程占住 3 秒**（点了按钮则提前结束）。
+
+改成广播回传后，脚本**弹完就返回** ⇒ 工作流立刻结束。
+
+⚠️ **代价是「超时兜底」要重新想**：原实现到点（默认 3 秒）会
+`NotificationManager.cancel(notificationId)` 自动收岛（`core.js:1963-1971`）。
+三条路，**未定，实施时需真机确认**：
+
+| 做法 | 代价 |
+|---|---|
+| 保留那段超时线程（**去掉** `result` / `unregisterReceiver` 那两句） | 它跑在 `new Thread(new Runnable{…})` 上 —— **不可靠路径**（实测矩阵 6/7） |
+| 交给岛自己的超时（`islandTimeout`，`core.js:2001` 已写 `10`） | ⚠️ **未验证岛到点会不会自己消失** |
+| 干脆不收（通知常驻到用户点或划掉） | 观感变差，但**行为可预测** |
+
+##### ⚠️ 已知限制（如实记录）
+
+| 限制 | 说明 |
+|---|---|
+| **只绕开「点击回传」这一处** | 岛/浮窗的**构造**部分（`Notification.Builder` / `PendingIntent` / `Icon` / `Bundle`）**不涉及子类化**，本来就没问题；而 `core.js` 别处若再出现「实现抽象类」仍会撞墙（根治要出路 ②） |
+| **需要 Shizuku / Root** | 广播触发器本身不需要，但**小窗打开**走的是 `service call`（§4.2）⇒ 仍依赖 |
+| **只对「打开方式」这一件事有效** | 「重新识别」这类按钮语义是**重新跑一遍识别**，改成广播后要由工作流再触发一次执行（而 `BLOCK_NEW` 重入策略会**忽略**这次触发 —— 除非工作流改成 `STOP_CURRENT_AND_RUN_NEW` 或 `ALLOW_PARALLEL`，`WorkflowReentryBehavior.kt`） |
+| **跨用户场景** | 原实现用 `createPackageContextAsUser` 取图标（`core.js:1918`），广播本身不跨用户；extras 里要带 `userId` 由工作流侧处理 |
+
+##### 与出路 ② 的关系
+
+**两者不冲突，且都值得做**：
+
+- **①** 让**岛这条路径立刻能跑**（不依赖改 vFlow）—— 代价是「回传要绕一圈」
+- **②** 是**根治**（让脚本能子类化抽象类）—— 但**改上游核心文件**（`FORK.md` 要登记）
+  + 引入 dx 依赖（约 1 MB）
+
+⇒ **建议先做 ① 打通岛路径，再评估 ②**。而且 ① 做完之后，
+**② 的优先级会下降** —— 「回传绕一圈」换来的不只是权宜之计，
+**「不阻塞」本身就是一个改善**（见上）。
 
 #### 对 P0 的影响
 
 **P0 的目标（「复制 → 识别 → 提示 → 打开」）用浮窗路径已经跑通**（见 §7.1）。
-岛形态的恢复**不阻塞 P0**，但**是用户的核心诉求** ⇒ 列为 P1 第一项（出路 ①）。
+岛形态的恢复**不阻塞 P0**，但**是用户的核心诉求** ⇒ 列为 P1 第一项（出路 ①，见上）。
 
 ---
 
@@ -671,7 +787,8 @@ public Class<?> defineClass(String name, byte[] data) {
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **0** | ⭐ **补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ①。**这是恢复超级岛形态的前提**，也是本批**唯一要改 vFlow 核心代码**的项 |
+| **0** | ⭐ **把按钮回传改成「广播 → vFlow 广播触发器」** | 见 §4.6 出路 ①。**恢复超级岛形态的路径**，且**不用改 vFlow**、顺带解决「阻塞 3 秒」 |
+| **0b** | （可选，根治）**补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ②。做完 0 之后**优先级下降**；它是本批**唯一要改 vFlow 核心代码**的项 |
 | 7 | QQ / 微信触发源 | `vflow.trigger.activity_changed` + `class_filter` 精确匹配；脚本里改用 `intent_uri` 抠 `S.url=` / `S.rawUrl=` |
 | 8 | 附加插件广播触发源 | `vflow.trigger.broadcast` + `extras_json`；⚠️ 需确认附加插件（`com.nyehueh.fluidcloud`）是否要改，或改用 vFlow 自己的广播 |
 | 9 | 小窗打开 | `service call activity_task 138`（§4.2）；非小米机型降级全屏 |
@@ -741,7 +858,7 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层 —— 把 `.class` �
 `new java.util.ArrayList({size:…})` 更是直接 NPE。
 
 ⇒ 教训：**判据不能只看「调用有没有返回值」**，要看**实际类型**（`getClass()`）。
-这直接影响了 §4.6 的结论排序（把「浮窗替代」从出路 ① 降到 ②）。
+这直接影响了 §4.6 的结论排序（把「浮窗替代」从出路 ① 一路降到 ③）。
 
 ### ⚠️ 顺带发现的既有行为（**不是缺陷**，但会误导排查）
 
@@ -782,9 +899,11 @@ vFlow 远程 API 的请求体上限是 **24 KB**（`BaseHandler.readBody` 的
 
 | # | 问题 | 影响 | 何时需要答 | 现状 |
 |---|---|---|---|---|
-| 0 | **岛通知怎么绕开「不能 `new` 抽象类」** | **P0 的头号阻塞项**。见 §4.6 的四条出路 | P1 第一项 | ⚠️ **方向已明**：给 `ContextFactory` 覆写 `createClassLoader`（出路 ①）。**未实施**（P0 暂用浮窗绕过） |
-| 0b | **`com.android.tools:r8` 作运行期依赖的体积代价** | 出路 ① 需要 `dx`（约 1 MB）打进 APK。是否接受？是否只给 `:app` 加、`:core` 不加？ | P1 实施前 | 未答 |
-| 0c | **`rhino-android` 要不要直接用** | 它 2021 年停更、绑 `rhino-runtime:1.7.13`（vFlow 用 1.9.0）⇒ **不建议直接依赖**，倾向自己实现那一层 | P1 实施前 | 倾向**自己写** |
+| 0 | **岛通知怎么绕开「不能 `new` 抽象类」** | **P0 的头号阻塞项**。见 §4.6 的四条出路 | P1 第一项 | ✅ **已定案**（2026-10-07）：**脚本只发广播、不当接收方**，由 vFlow 广播触发器接（§4.6 出路 ①）。**未实施** |
+| 0a | **按钮 extras 的字段设计** | 固定 action 后，靠 extras 区分「哪一次、打开什么、怎么打开」⇒ 字段一旦定错，工作流侧拼不出正确命令 | 实施出路 ① 时**先定** | ⚠️ **未定**。必须与「工作流里怎么取值」一起定（§4.6 的契约 B） |
+| 0b | **岛的超时兜底怎么办** | 不阻塞后，原来「3 秒后自动收岛」那一段（`core.js:1965`）要不要保留？改由 `islandTimeout` 承担的话，**岛会不会自己消失**未验证 | 实施出路 ① 时 | ⚠️ **未验**（需真机看岛的超时行为） |
+| 0c | **`com.android.tools:r8` 作运行期依赖的体积代价** | **出路 ②**（根治）需要 `dx`（约 1 MB）打进 APK。是否接受？是否只给 `:app` 加、`:core` 不加？ | 若做出路 ② | 未答（做 ① 则不需要） |
+| 0d | **`rhino-android` 要不要直接用** | 它 2021 年停更、绑 `rhino-runtime:1.7.13`（vFlow 用 1.9.0）⇒ **不建议直接依赖**，倾向自己实现那一层 | 若做出路 ② | 倾向**自己写**（做 ① 则不需要） |
 | 1 | **配置目录放哪** | 决定 §3.3 的全部路径改造 | P0 第 3 步之前 | ✅ **已答**：`/sdcard/vFlow/fluid-cloud/`（实测可读写） |
 | 2 | **`vflow.system.js` 要不要开超时** | 不开则脚本死循环挂线程（§6-5）。但**给 `JsModule` 加超时参数是一次独立的行为变更**（存量脚本会开始失败），FORK.md 明确说要单独评估 | P0 之后、上真机之前 | ⚠️ **真机实测影响有限**：`core.js` 的阻塞点是 `while (result === null) { Thread.sleep(150); }`，有 `timeout` 兜底（默认 3 秒），**不会无限挂**。⇒ 优先级降到 P2 |
 | 3 | **岛通知走 A（脚本内拼）还是 B（新增模块）** | 决定 §4.1 的路线与工作量 | P0 第 5 步之前 | ⚠️ **已被 §4.6 改变前提**：路线 A 在**点击回传**上撞墙 ⇒ 需要先解 #0 |
