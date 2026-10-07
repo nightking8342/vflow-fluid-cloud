@@ -1889,9 +1889,9 @@ function showIslandNotification(opts, result, timeout) {
             //    从 payload 里去掉，两条就会完全同身份、**按钮静默变成全屏**（不报错）。
             //    加一不加价。
             mainPendingIntent = createClickBroadcastIntent(
-                buildClickPayload(openWith, mainAct), notificationId);
+                buildClickPayload(openWith, mainAct, notificationId), notificationId);
             buttonPendingIntent = createClickBroadcastIntent(
-                buildClickPayload(openWith, buttonAct), notificationId + 1);
+                buildClickPayload(openWith, buttonAct, notificationId), notificationId + 1);
         } else if (pull_small_window && openWith) {
             // 旧行为（VFLOW_CLICK_BROADCAST=false 时）：主体直接启动 Activity，按钮仍需脚本接收
             mainIntent = createLaunchIntent(openWith);
@@ -1955,6 +1955,17 @@ function showIslandNotification(opts, result, timeout) {
             .setContentText(content)
             .setSmallIcon(iconDrawable)
             .setContentIntent(mainPendingIntent)
+            // ⚠️⚠️ **系统级的自动收通知**（AOSP `NotificationManagerService` 用
+            //    `AlarmManager.setExactAndAllowWhileIdle` 到点 cancel，见 `NMS.java:10269-10274`）。
+            //    上游**完全依赖自己那段超时线程**去 cancel —— 而那段线程跑在
+            //    `new Thread(new Runnable{…})` 上（**不可靠路径**，见 DESIGN.md §4.6 的实测矩阵），
+            //    且本次改动把它删了（不再阻塞）⇒ **没有它，通知会永久留在通知栏**（用户 2026-10-08 实测）。
+            //
+            // ⚠️ 它只影响**通知栏那条通知**；超级岛的消失由 `islandTimeout` 独立控制
+            //    （所以用户看到的是「岛没了、通知还在」）。
+            //
+            // ⚠️ `timeout` 是**毫秒**（与 `Fluid_Cloud_timeout` 同单位），直接传。
+            .setTimeoutAfter(timeout > 0 ? timeout : 3000)
             .setWhen(java.lang.System.currentTimeMillis())
             .setShowWhen(true);
         builder.addExtras(extras);
@@ -1980,6 +1991,24 @@ function showIslandNotification(opts, result, timeout) {
         return "已发送";
 }
 // 构建超级岛参数
+/**
+ * 岛的存活时长（**秒**）。
+ *
+ * ⚠️ **单位与配置不同** —— `Fluid_Cloud_timeout` 是**毫秒**（默认 3000），
+ *    而岛参数 `islandTimeout` 是**秒**（官方模板约定，见 vFlow 的
+ *    `IslandTemplate.kt`：「注意与通知的 `timeout`（分钟）单位不同」）。
+ *
+ * ⚠️ **上游写死 10 秒**（`reference/core.js:2170`），**没读配置** ——
+ *    本次改为读配置（用户 2026-10-08 要求）。⇒ 默认配置下岛会从 10 秒变成 **3 秒**。
+ *    嫌太快就调大 `config.json` 的 `Fluid_Cloud_timeout`（它是同一个「等用户多久」的语义）。
+ */
+function islandTimeoutSeconds() {
+    var ms = parseInt(Fluid_Cloud_timeout, 10);
+    if (isNaN(ms) || ms <= 0) ms = 3000;
+    // ⚠️ 向上取整且**至少 1 秒** —— 传 0 给 `islandTimeout` 的语义未定义
+    return Math.max(1, Math.ceil(ms / 1000));
+}
+
 function buildIslandParams(title, content, buttonText) {
     var islandParams = {
         "param_v2": {
@@ -1987,7 +2016,9 @@ function buildIslandParams(title, content, buttonText) {
             "business": "fluid_cloud", // 业务场景
             "enableFloat": true, // 允许展开
             "updatable": false, // 非持续性通知
-            "timeout": 10, // 10分钟自动消失
+            // ⚠️ 这个 `timeout` 是**分钟**（官方模板约定），上游写死 10。
+            //    本次与 `islandTimeout` 一起从配置推导（取同一个「等用户多久」的语义）。
+            "timeout": Math.max(1, Math.ceil(islandTimeoutSeconds() / 60)),
             "islandFirstFloat": true,
             // 状态栏数据
             "ticker": title,
@@ -1998,7 +2029,8 @@ function buildIslandParams(title, content, buttonText) {
             // 岛数据
             "param_island": {
                 "islandProperty": 1, // 信息展示为主
-                "islandTimeout": 10, 
+                // ⚠️ 秒（见 islandTimeoutSeconds 的注释）。上游写死 10，现读配置。
+                "islandTimeout": islandTimeoutSeconds(),
                 // 大岛内容 - 使用基础信息模板
                 "bigIslandArea": {
                     "imageTextInfoLeft": {
@@ -2165,7 +2197,7 @@ var VFLOW_CLICK_BROADCAST = true;
  * `encodeURIComponent` 的代价很小（实测 92 → 110 字节，1.20×），
  * 换来「解析绝不会错」。
  */
-function buildClickPayload(openWith, act) {
+function buildClickPayload(openWith, act, notificationId) {
     // ⚠️ `act` 决定打开方式，`type` 决定链接怎么解析（与 launchWithMode 的两个入参对应）
     var type = openWith.type || "url";
     // ⚠️ 与 OpenMain 里 launchWithMode 的取值口径一致：
@@ -2173,6 +2205,12 @@ function buildClickPayload(openWith, act) {
     var raw = (type === "pkg") ? openWith.link : openWith.urlsharme;
     var qs = [
         "act=" + encodeURIComponent(String(act || "fullscreen")),
+        // ⚠️ `nid` = 通知 ID —— 工作流处理完点击后**用它把通知栏那条收掉**。
+        //    为什么必须带上：通知的自动消失已经交给系统的 `setTimeoutAfter`，
+        //    但**用户点开之后**那条通知没有理由继续挂着（原来靠脚本自己 cancel，
+        //    现在脚本不参与点击了）⇒ 由工作流补这一刀。
+        //    见 `launchFromClick` 与 DESIGN.md §4.6。
+        "nid=" + encodeURIComponent(String(notificationId == null ? "" : notificationId)),
         "pkg=" + encodeURIComponent(String(openWith.pkg || "")),
         "uid=" + encodeURIComponent(String(openWith.UserId == null ? 0 : openWith.UserId)),
         "type=" + encodeURIComponent(String(type)),
@@ -2235,6 +2273,129 @@ function createClickBroadcastIntent(data, requestCode) {
         intent,
         PendingIntent.FLAG_IMMUTABLE
     );
+}
+
+/**
+ * 解析点击回传的载荷（与 [buildClickPayload] 成对）。
+ *
+ * ## 为什么需要它
+ *
+ * 工作流收到广播后，把 `data_uri` 作为输入再喂回**同一个脚本**（见 DESIGN.md §4.6）——
+ * 那次执行的 `inputs.text` 就是这条 URI。不解析的话脚本会拿整串 URI 去识别链接，
+ * 识别出一堆垃圾。
+ *
+ * ## ⚠️ 必须在【顶层分派之前】调用
+ *
+ * 调用点是文件末尾那段顶层代码：`if (VFLOW_CLICK_ACTION == "click") { launchFromClick(…) } else { …原识别链路… }`
+ * ⇒ 点击回传那次执行**不会**走识别、**不会**弹岛，只做「打开」这一件事。
+ * 这正是「不阻塞」的兑现方式：第一次执行弹完就退场，第二次执行只管打开。
+ *
+ * ## ⚠️ 解析失败必须**显式报错**
+ *
+ * 静默的后果是「点了按钮什么都没发生」，而用户完全无从判断是广播没到、
+ * 载荷解析错了、还是打开失败 ⇒ 每一处都抛/打日志。
+ *
+ * @return 解析出的对象，或 `null`（不是点击载荷）
+ */
+function parseClickPayload(uri) {
+    if (typeof uri !== "string" || uri.indexOf(FLUID_CLOUD_DATA_SCHEME + "://click?") !== 0) {
+        return null;
+    }
+    var qs = uri.substring((FLUID_CLOUD_DATA_SCHEME + "://click?").length);
+    var out = {};
+    var pairs = qs.split("&");
+    for (var i = 0; i < pairs.length; i++) {
+        var eq = pairs[i].indexOf("=");
+        if (eq < 0) continue;
+        var k = pairs[i].substring(0, eq);
+        var v = pairs[i].substring(eq + 1);
+        try {
+            out[k] = decodeURIComponent(v);
+        } catch (e) {
+            // 解码失败就保留原文 —— 总比丢掉强
+            out[k] = v;
+        }
+    }
+    if (!out.url) {
+        throw new Error("点击载荷里没有 url：" + uri);
+    }
+    return out;
+}
+
+/**
+ * 点击回传那次执行的全部动作：把载荷变成一次 `launchWithMode`。
+ *
+ * ⚠️ `type` 决定用哪个字段（与 [buildClickPayload] 的编码口径、以及
+ *    `OpenMain` 里 `launchWithMode` 的调用口径**三处一致**）：
+ *    `url`/`intent` ⇒ 载荷里的 `url`；`pkg` ⇒ 也是载荷里的 `url`（编码时已从 `link` 取过）。
+ *
+ * ⚠️ 这里**没有 `openWith` 对象**（它在第一次执行里），所以 `activity` 传 `null`
+ *    —— 与 `OpenMain` 里 `Open_With_List[0].activity` 通常为 `null` 一致
+ *    （`matchRules` 产出的 `activity` 就是 `null`，见该函数）。
+ */
+function launchFromClick(payload) {
+    var mode = payload.act || "fullscreen";
+    var type = payload.type || "url";
+    var pkg = payload.pkg || "";
+    var uid = parseInt(payload.uid, 10);
+    if (isNaN(uid)) uid = 0;
+
+    console.log("流体云：收到点击回传 mode=" + mode + " pkg=" + pkg + " url=" + payload.url);
+
+    // ⚠️ **先把通知收掉，再打开。** 顺序有讲究：
+    //    用户点开之后那条通知没有理由继续挂着（原来靠脚本自己 cancel，
+    //    现在脚本不参与点击了 ⇒ 由这里补这一刀）。
+    //    放在打开**之前**：打开可能失败（如「未找到可启动的 Activity」），
+    //    而那种情况下用户已经点过了、通知留着也没意义，反而是个碍事的残留。
+    cancelNotificationById(payload.nid);
+
+    // ⚠️ 与第一次执行**同源**的配置（同一个 config.json）
+    var cfg = readJsonFile(FLUID_CLOUD_DIR + "/config.json");
+    launchWithMode(
+        (type === "pkg") ? "intent" : type,
+        payload.url,
+        cfg.Window_Configuration,
+        cfg.Launch_Windowing_Mode,
+        mode,
+        pkg,
+        null,
+        uid
+    );
+    return "已处理点击回传：" + mode;
+}
+
+/**
+ * 按通知 ID 收掉通知栏里那条。
+ *
+ * ## ⚠️ 为什么不能静默失败
+ *
+ * 拿不到 ID / 收不掉都不影响**打开链接**这件正事，所以不该抛；
+ * 但**必须打日志** —— 「通知点完不消失」是用户看得见的现象，
+ * 而它可能来自三种完全不同的原因（ID 没传进来 / ID 解析不出来 / cancel 抛了），
+ * 不留痕就分不清是哪一种。
+ *
+ * ## ⚠️ `NotificationManager` 的取法
+ *
+ * 这里没有 `showIslandNotification` 里那个局部变量（那是**上一次执行**的作用域），
+ * 必须自己取一次。
+ */
+function cancelNotificationById(rawId) {
+    if (rawId === undefined || rawId === null || String(rawId) === "") {
+        console.log("流体云：载荷里没有 nid，无法收通知（点完通知栏会留一条）");
+        return;
+    }
+    var nid = parseInt(rawId, 10);
+    if (isNaN(nid)) {
+        console.log("流体云：nid 不是数字（" + rawId + "），无法收通知");
+        return;
+    }
+    try {
+        var nm = context.getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.cancel(nid);
+        console.log("流体云：已收掉通知 id=" + nid);
+    } catch (e) {
+        console.log("流体云：收通知失败 id=" + nid + " —— " + e);
+    }
 }
 
 // 创建启动Intent
@@ -2492,7 +2653,35 @@ function OpenMain(AllLinks, showfloat) {
         throw new Error("未知的type：" + openWith.type);
     }
 }
-if (DebugMode == false && isRunAction == true) {
+// ════════════════════════════════════════════════════════════════════════════
+// 【vflow】顶层分派：本次执行是「点击回传」还是「识别」？
+//
+// 点击回传由工作流经广播触发器接住，再把 `data_uri` 作为 `inputs.text` 喂回来
+// （见 DESIGN.md §4.6 出路 ①）。那一次执行的文本**不是**分享文案，而是
+// `vflowfc://click?...` 这条 URI ⇒ 必须在这里分流，**不能让它落进识别链路**
+// （否则会拿 URI 去识别链接、弹一堆无意义的岛）。
+//
+// ⚠️ 分流必须在**最外层**（`if (DebugMode == false && isRunAction == true)` 那个
+//    大分支**之前**）—— 那个分支是「设置指令」入口，与点击回传无关。
+//
+// ⚠️ `isRunAction` 的语义：原脚本用它表示「由用户从设置里手动跑」。
+//    点击回传时它是 `false`（走正常执行路径），故这里只需判 action。
+// ════════════════════════════════════════════════════════════════════════════
+var VFLOW_CLICK_ACTION = (function () {
+    try {
+        var p = parseClickPayload(input);
+        return p ? "click" : "";
+    } catch (e) {
+        // ⚠️ 是点击载荷但解析失败 —— **必须显式报错**，不能退化成识别
+        //    （退化的表现是「点了按钮，反而又弹一个岛」，用户完全看不懂）
+        console.log("流体云：点击载荷解析失败 —— " + e);
+        throw e;
+    }
+})();
+
+if (VFLOW_CLICK_ACTION == "click") {
+    launchFromClick(parseClickPayload(input));
+} else if (DebugMode == false && isRunAction == true) {
     var setaction = showOptionsDialog(["设置指令", "编辑规则", "编辑无链接规则", "取消"], "选择操作");
     if (setaction == "设置指令") {
         showsettingsui();

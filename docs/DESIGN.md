@@ -985,6 +985,45 @@ if (!cancelCurrent) {
 那就得让工作流**再触发一次脚本执行**（而 `BLOCK_NEW` 重入策略会忽略这次触发，
 见「已知限制」表）。⇒ **「重新识别」这一类按钮不适合直接照搬，需单独设计。**
 
+##### 通知的「收尾」：两个 timeout 单位不同，且上游一个都没用系统能力
+
+⚠️ **2026-10-08 真机暴露**：用户反馈「**岛一会儿就消失了，但通知栏里那条一直在**」。
+
+**真因（已核实）**：上游 `reference/core.js` **完全依赖自己那段超时线程**去
+`NotificationManager.cancel`（`reference/core.js:2124-2135`），而
+`setTimeoutAfter` / `setAutoCancel` / `setOngoing` **一个都没用**
+（`grep` 逐条核实，零命中）。本次改动把那段线程删了（不再阻塞）⇒ **通知永久留在通知栏**。
+
+**三个「超时」的单位各不相同，混起来不会报错、只会「消失得太快/太慢」**：
+
+| 字段 | 位置 | 单位 | 上游取值 |
+|---|---|---|---|
+| `Fluid_Cloud_timeout` | `config.json` | **毫秒** | 3000 |
+| `param_island.islandTimeout` | 岛参数 | **秒** | ⚠️ **写死 10**（没读配置） |
+| `timeout`（根级） | 岛参数 | **分钟** | ⚠️ **写死 10** |
+| `setTimeoutAfter(ms)` | `Notification.Builder` | **毫秒** | ⚠️ **上游没用** |
+
+**本轮的处置**：
+
+| # | 改动 | 依据 |
+|---|---|---|
+| 1 | **加 `setTimeoutAfter(Fluid_Cloud_timeout)`** | AOSP `NotificationManagerService` 用 `AlarmManager.setExactAndAllowWhileIdle` 到点 cancel（`NMS.java:10269-10274`）⇒ **不依赖 App 进程活着** |
+| 2 | **`islandTimeout` 改读配置**（`Fluid_Cloud_timeout / 1000` 向上取整） | 用户 2026-10-08 要求。⚠️ **副作用**：默认配置下岛从 **10 秒变成 3 秒**（嫌快就调大配置） |
+| 3 | **载荷带 `nid`**（通知 ID）⇒ `launchFromClick` 里 `cancelNotificationById(payload.nid)` | ⚠️ 用户点开之后那条通知没有理由继续挂着 —— 原来靠脚本 cancel，现在脚本不参与点击了 |
+| 4 | **根级 `timeout` 也按配置推导**（秒 → 分钟，向上取整、至少 1） | 与 2 同源，避免「岛 3 秒、通知 10 分钟」这种两套语义 |
+
+**真机验证（小米 MIX Fold 3 / Android 17，2026-10-08）**：
+
+| 项 | 结果 |
+|---|---|
+| 触发后通知出现 | ✅ 第 1 秒 `channel=fluid_cloud_channel` 计数 = 2（通知本体 + 岛相关记录） |
+| 3 秒后自动消失 | ✅ 第 3 秒计数 = **0**（`setTimeoutAfter` 生效） |
+| 点按钮 → 小窗打开 | ✅ `Task{… mode=freeform}` |
+| 点击后通知被收掉 | ✅ 日志 `已收掉通知 id=391000172`，通知计数 = 0 |
+
+⚠️ **未验**：`islandTimeout` 从 10 改成 3 之后**岛的实际存活**（用户说「好像一会儿就消失」，
+但那是改之前的行为）。改后的 3 秒是否符合预期，**要用户自己看一眼**。
+
 ##### ⚠️ 已知限制（如实记录）
 
 | 限制 | 说明 |

@@ -225,25 +225,34 @@ test('产物被两个源文件正确拼起来（分隔标记 + 顺序）', () =>
     assert(adapterIdx < idx, 'adapter 段必须排在 core 段之前');
 });
 
-test('配置路径已换到 FLUID_CLOUD_DIR（core 段 9 处）', () => {
-    // ⚠️ 只数 **core 段** —— adapter.js 里也有 FLUID_CLOUD_DIR 的用法（自举那几处，
-    //    实测 6 处），全文件计数会把它们算进来。分段是必需的。
+test('配置路径已换到 FLUID_CLOUD_DIR（core 段 ≥ 9 处）', () => {
+    // ⚠️ 只数 **core 段** —— adapter.js 里也有 FLUID_CLOUD_DIR 的用法（自举那几处），
+    //    全文件计数会把它们算进来。分段是必需的。
+    //
+    // ⚠️⚠️ **用下界而不是等号** —— 初版写的是 `assertEq(n, 9)`，而移植完成后
+    //    每**新增一处**配置读取（如 2026-10-07 加 `launchFromClick` 里那次
+    //    `config.json`）都会让它变红。那种「合法改动也红」的断言会被下一个实现者
+    //    直接改成新数字、或者干脆删掉 —— 两次之后它就形同虚设。
+    //    真正要防的是**回归**（补丁丢了、路径退回去），那是**减少**方向的事
+    //    ⇒ 下界足够，且不会因为「多加了一次读取」误报。
     const corePart = scriptText.split('// ↓↓↓ 核心逻辑（src/core.js）')[1] || '';
     const n = (corePart.match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
-    assertEq(n, 9, 'core 段的配置路径替换数不对');
+    assert(n >= 9, `core 段的配置路径只有 ${n} 处（下界 9）—— 是不是有路径退回原平台了？`);
 });
 
-test('配置路径已换到 FLUID_CLOUD_DIR（adapter 段 6 处）', () => {
+test('配置路径已换到 FLUID_CLOUD_DIR（adapter 段 ≥ 6 处）', () => {
     const adapterPart = scriptText.split('// ↓↓↓ 核心逻辑（src/core.js）')[0] || '';
     const n = (adapterPart.match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
-    assertEq(n, 6, 'adapter 段的配置路径数不对');
+    assert(n >= 6, `adapter 段的配置路径只有 ${n} 处（下界 6）`);
 });
 
-test('两个源文件的配置路径数各自没丢（6 / 9）', () => {
+test('两个源文件的配置路径数各自没丢（6 / 9 为下界）', () => {
     // ⚠️ 这是**源码侧**的锚，与上面两条产物侧的分段计数互补：
     //    产物计数能发现「拼错了」，源码计数能发现「补丁从 src 里丢了但 dist 是旧的」。
-    assertEq((readSrc('adapter.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length, 6, 'src/adapter.js');
-    assertEq((readSrc('core.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length, 9, 'src/core.js');
+    const a = (readSrc('adapter.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
+    const c = (readSrc('core.js').match(/FLUID_CLOUD_DIR \+ "\//g) || []).length;
+    assert(a >= 6, `src/adapter.js 只有 ${a} 处`);
+    assert(c >= 9, `src/core.js 只有 ${c} 处`);
 });
 
 test('原平台的配置目录路径未在代码里复活', () => {
@@ -518,6 +527,9 @@ test('showIslandNotification 弹完即返回（不阻塞），且两条 PendingI
     //    留 500ms 余量（CI 机器慢），真阻塞的话是 3000ms，分得很开。
     assert(ms < 500, `应立刻返回，实际 ${ms}ms（是不是又在等点击？）`);
     assertEq(c.notify.length, 1, '应该发了 1 条通知');
+    // ⚠️ 通知必须带系统级超时 —— 否则它会**永久留在通知栏**（真机实测过）。
+    //    3000ms 是默认配置值，原样传给 setTimeoutAfter（单位同为毫秒）。
+    assertEq(c.notify[0].notification._timeoutAfter, 3000, '通知没设 setTimeoutAfter（会永久留在通知栏）');
 
     const broadcasts = c.pending.filter((p) => p.kind === 'broadcast');
     assertEq(broadcasts.length, 2, '主体 + 按钮两条 PendingIntent 都该是 broadcast');
@@ -535,6 +547,125 @@ test('showIslandNotification 弹完即返回（不阻塞），且两条 PendingI
     // 主体是全屏、按钮是小窗（与 resultOnClick / resultOnButton 对应）
     assert(String(a.intent._data).includes('act=fullscreen'), `主体应是 fullscreen：${a.intent._data}`);
     assert(String(b.intent._data).includes('act=window'), `按钮应是 window：${b.intent._data}`);
+});
+
+test('parseClickPayload ↔ buildClickPayload 往返一致（含 & 与中文）', () => {
+    const { sandbox } = run({ text: 'x' });
+    const cases = [
+        { type: 'url', pkg: 'tv.danmaku.bili', urlsharme: 'https://a.com/x?p=1&q=2', UserId: 0 },
+        { type: 'url', pkg: 'com.x', urlsharme: 'https://pan.quark.cn/s/abc 提取码：1234', UserId: 0 },
+        { type: 'pkg', pkg: 'com.y', link: 'oof.disk://abc?x=1&y=2', urlsharme: undefined, UserId: 2 },
+    ];
+    for (const ow of cases) {
+        const uri = sandbox.buildClickPayload(ow, 'window');
+        const p = sandbox.parseClickPayload(uri);
+        assert(p !== null, `解析失败：${uri}`);
+        assertEq(p.act, 'window', `act 往返不一致：${uri}`);
+        assertEq(p.pkg, ow.pkg, `pkg 往返不一致：${uri}`);
+        assertEq(p.type, ow.type, `type 往返不一致：${uri}`);
+        assertEq(p.uid, String(ow.UserId), `uid 往返不一致：${uri}`);
+        // ⚠️ 这一条是本组的关键：带 `?` `&` 与中文的链接必须**逐字**还原
+        const expectUrl = (ow.type === 'pkg') ? ow.link : ow.urlsharme;
+        assertEq(p.url, expectUrl, `url 往返不一致（编码/解码有问题）：${uri}`);
+    }
+});
+
+test('载荷带上通知 ID（nid）—— 工作流用它收掉通知栏那条', () => {
+    // ⚠️ 起因：通知的自动消失已交给系统 `setTimeoutAfter`，但**用户点开之后**
+    //    那条通知没有理由继续挂着（原来靠脚本自己 cancel，现在脚本不参与点击了）。
+    const { sandbox } = run({ text: 'x' });
+    const uri = sandbox.buildClickPayload({ type: 'url', pkg: 'com.x', urlsharme: 'https://a.com', UserId: 0 }, 'window', 123456);
+    assert(uri.includes('nid=123456'), `载荷没带 nid：${uri}`);
+    assertEq(sandbox.parseClickPayload(uri).nid, '123456', 'nid 往返不一致');
+    // 没传 id 时也要能编码（不崩），只是值为空
+    const uri2 = sandbox.buildClickPayload({ type: 'url', pkg: 'com.x', urlsharme: 'https://a.com', UserId: 0 }, 'window');
+    assert(uri2.includes('nid='), `没传 id 时也该有 nid 键：${uri2}`);
+});
+
+test('点击回传时会收掉通知（拿不到 id 时只打日志、不抛）', () => {
+    const uri = 'vflowfc://click?act=fullscreen&nid=987654&pkg=tv.danmaku.bili&uid=0&type=url&url=https%3A%2F%2Fb23.tv%2Fabc';
+    const { calls: c } = run({ text: uri });
+    assert(c.cancelNotification.includes(987654), `没有 cancel 通知（收到：${JSON.stringify(c.cancelNotification)}）`);
+    assert(c.log.some((l) => l.includes('已收掉通知')), '没有「已收掉通知」日志');
+
+    // 缺 nid：不能抛（收不掉通知不该妨碍「打开链接」这件正事），但要有日志
+    const uri2 = 'vflowfc://click?act=fullscreen&pkg=tv.danmaku.bili&uid=0&type=url&url=https%3A%2F%2Fb23.tv%2Fabc';
+    const r2 = run({ text: uri2 });
+    assert(r2.calls.log.some((l) => l.includes('没有 nid')), '缺 nid 时必须留日志 —— 否则「点完不消失」查不出原因');
+});
+
+test('parseClickPayload 对非点击载荷返回 null（不能把分享文案当载荷）', () => {
+    const { sandbox } = run({ text: 'x' });
+    for (const s of ['https://a.com', 'vflowfc://other?x=1', '', null, undefined, 'FLUID_CLOUD_CLICK_MAIN_1']) {
+        assertEq(sandbox.parseClickPayload(s), null, `不该把 ${JSON.stringify(s)} 当成点击载荷`);
+    }
+});
+
+test('parseClickPayload 缺 url 时抛（不静默变成「点了没反应」）', () => {
+    const { sandbox } = run({ text: 'x' });
+    let threw = false;
+    try { sandbox.parseClickPayload('vflowfc://click?act=window&pkg=com.x'); } catch (e) { threw = true; }
+    assert(threw, '缺 url 必须抛 —— 静默的后果是「点了按钮什么都没发生」且查不出原因');
+});
+
+test('顶层分派：点击载荷走 launchFromClick，不走识别链路', () => {
+    const uri = 'vflowfc://click?act=window&pkg=tv.danmaku.bili&uid=0&type=url&url=https%3A%2F%2Fwww.bilibili.com%2Fvideo%2FBV1xx%3Fp%3D2';
+    const { calls: c } = run({ text: uri });
+    // ⚠️ 点击回传那次执行**不该弹岛**（它只负责打开）
+    assertEq(c.notify.length, 0, '点击回传那次执行不该发通知 —— 那会再弹一个岛');
+    // 而它应该真的调了 launchWithMode（真机上是 startActivity / shell）
+    const didSomething = c.startActivity.length > 0 || c.shell.length > 0;
+    assert(didSomething, `点击回传没产生任何启动动作（startActivity=${c.startActivity.length} shell=${c.shell.length}）`);
+    // 且日志里能看出走的是哪条路
+    assert(c.log.some((l) => l.includes('收到点击回传')), '没有「收到点击回传」日志 —— 分流没生效？');
+});
+
+test('顶层分派：普通分享文案仍走识别链路（没被分流改坏）', () => {
+    const { calls: c } = run({ text: '看看这个 https://www.example.com/abc 很好' });
+    assert(!c.log.some((l) => l.includes('点击回传')), '普通文案被误判成点击载荷');
+});
+
+test('通知带系统级超时（setTimeoutAfter），不再依赖脚本自己 cancel', () => {
+    // ⚠️⚠️ 起因：真机实测「岛一会儿就消失了，但通知栏里那条一直在」（用户 2026-10-08）。
+    //    真因是本次改动删掉了上游那段「超时后 NotificationManager.cancel」的线程
+    //    （它跑在 `new Thread(new Runnable{…})` 上，是不可靠路径），而**上游完全依赖它**
+    //    —— 上游的 core.js 里 `setTimeoutAfter` / `setAutoCancel` **一个都没用**（已 grep 核实）。
+    //
+    //    正解是 `setTimeoutAfter(ms)`：AOSP `NotificationManagerService` 用
+    //    `AlarmManager.setExactAndAllowWhileIdle` 到点 cancel（NMS.java:10269-10274），
+    //    **不依赖 App 进程活着**。
+    const core = readSrc('core.js');
+    const body = stripComments(functionBodyOf(core, 'showIslandNotification'));
+    assert(/\.setTimeoutAfter\(/.test(body), 'showIslandNotification 没有 setTimeoutAfter —— 通知会永久留在通知栏');
+    // ⚠️ 反向锁：不能又退回「自己开线程 cancel」（那是被删掉的不可靠路径）
+    assert(!/NotificationManager\.cancel\(/.test(body), '又出现了 NotificationManager.cancel —— 通知的收尾应交给系统');
+    assert(!/new Thread\(/.test(body), 'showIslandNotification 里又开线程了（上游那段不可靠的超时线程）');
+});
+
+test('岛的存活时长读配置（Fluid_Cloud_timeout），不是写死 10 秒', () => {
+    // ⚠️ 上游写死 `islandTimeout: 10`（reference/core.js:2170），没读配置。
+    //    本次改为读 —— 而两个字段单位不同（`islandTimeout` 是**秒**、
+    //    通知的 `timeout` 是**分钟**、`Fluid_Cloud_timeout` 是**毫秒**），
+    //    换算错了不会报错、只会「岛消失得太快/太慢」。
+    const core = readSrc('core.js');
+    const body = stripComments(functionBodyOf(core, 'buildIslandParams'));
+    assert(/islandTimeoutSeconds\(\)/.test(body), 'buildIslandParams 没读配置里的超时');
+    assert(!/"islandTimeout":\s*\d/.test(body), 'islandTimeout 又被写死成常量了');
+
+    const { sandbox } = run({ text: 'x' });
+    // 3000ms（默认配置）⇒ 3 秒
+    sandbox.Fluid_Cloud_timeout = 3000;
+    const p = JSON.parse(sandbox.buildIslandParams('t', 'c', 'b'));
+    assertEq(p.param_v2.param_island.islandTimeout, 3, '3000ms 应换算成 3 秒');
+    assertEq(p.param_v2.timeout, 1, '3 秒向上取整到 1 分钟（timeout 的单位是分钟）');
+    // 8000ms ⇒ 8 秒；向上取整（不是截断）
+    sandbox.Fluid_Cloud_timeout = 8000;
+    assertEq(JSON.parse(sandbox.buildIslandParams('t', 'c', 'b')).param_v2.param_island.islandTimeout, 8, '8000ms 应是 8 秒');
+    // 非法值兜底
+    sandbox.Fluid_Cloud_timeout = 0;
+    assertEq(JSON.parse(sandbox.buildIslandParams('t', 'c', 'b')).param_v2.param_island.islandTimeout, 3, '0 应兜底成默认 3000ms');
+    sandbox.Fluid_Cloud_timeout = undefined;
+    assertEq(JSON.parse(sandbox.buildIslandParams('t', 'c', 'b')).param_v2.param_island.islandTimeout, 3, 'undefined 应兜底');
 });
 
 test('没有 openWith 的（多链接）走浮窗 —— 它需要脚本继续参与，回传做不到', () => {

@@ -40,6 +40,9 @@ const calls = {
     clipboard: [],
     shell: [],
     notify: [],
+    // 每次 `NotificationManager.cancel(id)` 记一条
+    // （2026-10-08 起「点击回传要收掉通知」是契约的一部分）
+    cancelNotification: [],
     startActivity: [],
     // 每次 `PendingIntent.getActivity/getBroadcast` 记一条
     // （2026-10-07 起 `requestCode` 是契约的一部分，必须能断言）
@@ -468,7 +471,7 @@ function installAndroid(sandbox, opts) {
     const notificationManager = {
         createNotificationChannel() {},
         notify(id, n) { calls.notify.push({ id, notification: n }); },
-        cancel() {}
+        cancel(id) { calls.cancelNotification.push(id); }
     };
 
     const context = {
@@ -562,6 +565,10 @@ function installAndroid(sandbox, opts) {
                     setContentText(t) { this._text = t; return this; }
                     setSmallIcon(i) { this._icon = i; return this; }
                     setContentIntent(i) { this._contentIntent = i; return this; }
+                    // ⚠️ 2026-10-08 起必须真实现 + 记录 —— 它是**通知能否自动消失**的唯一机制
+                    //    （上游完全依赖脚本自己开线程 cancel，本次改动删了那段）。
+                    //    不记录的话「有没有设、设成多少」测不出来。
+                    setTimeoutAfter(ms) { this._timeoutAfter = ms; return this; }
                     setWhen() { return this; }
                     setShowWhen() { return this; }
                     addExtras(b) {
@@ -573,7 +580,8 @@ function installAndroid(sandbox, opts) {
                         return {
                             extras: this._extras,
                             _title: this._title,
-                            _text: this._text
+                            _text: this._text,
+                            _timeoutAfter: this._timeoutAfter
                         };
                     }
                 },
