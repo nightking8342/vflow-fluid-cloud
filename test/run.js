@@ -77,6 +77,26 @@ function readSrc(name) {
 }
 
 /**
+ * 取出 `function <name>(...)` 的**函数体**（到列 0 的那个 `}` 为止）。
+ *
+ * ⚠️ **不能用「下一个标记串」切** —— 实测踩过：`core.js` 的 `showIslandNotification`
+ *    **体内**就有一句 `// 构建超级岛参数`（构造岛参数前的注释），而函数**外**紧跟着
+ *    一个同名的顶层注释。用 `indexOf('// 构建超级岛参数')` 切会命中体内那句，
+ *    切出来的「函数体」只有 4054 字符、**根本不含返回语句** ⇒ 断言恒红，
+ *    而看起来像是生产代码漏了 `return`（**方向完全指错**）。
+ *
+ * 顶层声明一律从列 0 开始 ⇒ 用「列 0 的 `}`」当结束边界是可靠的。
+ */
+function functionBodyOf(src, name) {
+    const start = src.indexOf('function ' + name + '(');
+    if (start < 0) throw new Error(`找不到函数 ${name}`);
+    const end = src.indexOf('\n}', start);
+    if (end < 0) throw new Error(`找不到函数 ${name} 的结束大括号`);
+    return src.slice(start, end);
+}
+
+
+/**
  * 跑一次脚本，返回沙箱（里面能访问 core.js 的所有函数与变量）。
  *
  * ⚠️ 每次都重建沙箱 —— 脚本有大量全局状态（`config` / `defaultBrowser` / `UserIds`），
@@ -397,7 +417,137 @@ test('含特殊字符的文本不崩', () => {
 });
 
 // ===========================================================================
-console.log('\n[8] 项目结构（架构调整后的不变量）');
+console.log('\n[8] 点击交给工作流（广播回传，2026-10-07）');
+// ===========================================================================
+
+// ⚠️ 本节锁的是**真机故障的修复**：`new BroadcastReceiver` 在 vFlow 里必然抛
+//    （`can't load this type of class file`，真因是 vFlow 的 ContextFactory 没覆写
+//    `createClassLoader`）。修法是**脚本只发广播、不当接收方**。
+//    这些断言的失败模式**全是静默的**（广播发错地方 / 编码漏了 / 两条 PendingIntent
+//    互相顶掉），不会崩、不会报错 ⇒ 只能在这里钉住。
+
+/** 造一个「有 openWith」的典型岛参数（单链接场景）。 */
+function islandOpts(overrides) {
+    const openWith = Object.assign({
+        type: 'url',
+        pkg: 'tv.danmaku.bili',
+        urlsharme: 'https://www.bilibili.com/video/BV1xx?share_source=copy_web&vd_source=abc',
+        activity: null, copy: '', title: '打开哔哩哔哩', message: '点击全屏打开',
+        UserId: 0, clearClipboard: false
+    }, (overrides || {}).openWith || {});
+    return Object.assign({
+        openWith, pkg: 'tv.danmaku.bili', userId: 0,
+        title: '打开哔哩哔哩', subtitle: '点击全屏打开', buttonText: '浮窗打开',
+        resultOnClick: 'fullscreen', resultOnButton: 'window'
+    }, overrides || {});
+}
+
+test('脚本里不再 new BroadcastReceiver / registerReceiver（那行在 vFlow 里必然抛）', () => {
+    // ⚠️ 剥注释后断言 —— 头部注释里**有意**保留着 `new BroadcastReceiver` 这个字样
+    //    （说明「原实现是这么写的、为什么不行」）。不剥会把文档判红。
+    const code = stripComments(readSrc('core.js'));
+    assert(!/new\s+BroadcastReceiver/.test(code), 'core.js 里又出现了 new BroadcastReceiver —— 那行在 vFlow 里必然抛');
+    assert(!/registerReceiver/.test(code), 'core.js 里又出现了 registerReceiver');
+    assert(!/WeakReference/.test(code), 'receiver 的 WeakReference 配套代码还在');
+    // 防空转：确认剥注释没剥过头
+    assert(code.includes('showIslandNotification'), '剥注释剥过头了');
+});
+
+test('岛函数不再阻塞（没有 while (result === null) 的等待循环）', () => {
+    const core = readSrc('core.js');
+    // ⚠️ 只看 **showIslandNotification 的函数体**（`showOptionsDialog` 与浮窗那两处
+    //    **仍然阻塞**，它们走的是脚本自己的 View.OnClickListener —— 接口，不炸）。
+    //    ⚠️ 用 functionBodyOf 而不是「切到下一个标记串」—— 体内有一句同名的注释，
+    //       切标记会切到体内、得到一段不含返回语句的残片（实测踩过，见该函数注释）。
+    const bodyRaw = functionBodyOf(core, 'showIslandNotification');
+    // ⚠️ 必须**剥注释**再断言 —— 改动时特意在原地留了「原来这里是
+    //    `while (result === null) { Thread.sleep(150); }`」的说明注释（那是改动理由，
+    //    该留），不剥的话断言会命中那句注释、判成「还有等待循环」（**方向指错**）。
+    const body = stripComments(bodyRaw);
+    assert(bodyRaw.length > 3000, `函数体只有 ${bodyRaw.length} 字符 —— 切片边界错了`);
+    assert(!/while\s*\(\s*result\s*===\s*null\s*\)/.test(body), 'showIslandNotification 里还有等待循环');
+    assert(!/Thread\.sleep/.test(body), 'showIslandNotification 里还有 Thread.sleep');
+    assert(/return\s+"已发送"/.test(body), 'showIslandNotification 的返回改过了？');
+});
+
+test('广播 action 与 scheme 是写死的常量（不能带运行期后缀）', () => {
+    const core = readSrc('core.js');
+    // ⚠️ 原实现是 `"FLUID_CLOUD_CLICK_BUTTON_" + notificationId` —— 运行期拼的。
+    //    而 vFlow 广播触发器的 `actions` 参数**不接受变量**（IntentFilter 注册期就固定）
+    //    ⇒ 必须是常量。带后缀的话工作流永远收不到。
+    assert(/var FLUID_CLOUD_ACTION_CLICK = "com\.chaomixian\.vflow\.fluidcloud\.CLICK"/.test(core),
+        'action 常量变了或不是字面量');
+    assert(/var FLUID_CLOUD_DATA_SCHEME = "vflowfc"/.test(core), 'scheme 常量变了');
+    // 反向锁：不能再出现「action + 运行期变量」
+    assert(!/ACTION_CLICK_MAIN\s*\+\s*notificationId/.test(core), 'action 又带上运行期后缀了');
+    assert(!/ACTION_CLICK_BUTTON\s*\+\s*notificationId/.test(core), 'action 又带上运行期后缀了');
+});
+
+test('payload 编码：url 必须 encodeURIComponent（否则 & 之后的段被吃掉）', () => {
+    const { sandbox } = run({ text: 'x' });
+    const p = sandbox.buildClickPayload({
+        type: 'url', pkg: 'tv.danmaku.bili',
+        urlsharme: 'https://a.com/x?p=1&q=2', UserId: 0
+    }, 'window');
+
+    assert(p.startsWith('vflowfc://click?'), `scheme/host 不对：${p}`);
+    assert(p.includes('act=window'), `act 不对：${p}`);
+    assert(p.includes('pkg=tv.danmaku.bili'), `pkg 不对：${p}`);
+    // ⚠️ 核心断言：链接里的 `?` 与 `&` 必须被编码成 %3F / %26
+    assert(p.includes('url=https%3A%2F%2Fa.com%2Fx%3Fp%3D1%26q%3D2'), `url 未正确编码：${p}`);
+    assert(!/[?&]q=2/.test(p.split('url=')[1] || ''), 'url 里的 & 没被编码 —— 解析时会丢后半段');
+});
+
+test('payload 的 type=pkg 用 link 字段（与 launchWithMode 的口径一致）', () => {
+    const { sandbox } = run({ text: 'x' });
+    const p = sandbox.buildClickPayload({
+        type: 'pkg', pkg: 'com.x', link: 'oof.disk://abc', urlsharme: undefined, UserId: 0
+    }, 'fullscreen');
+    assert(p.includes('type=pkg'), `type 不对：${p}`);
+    assert(p.includes('url=oof.disk%3A%2F%2Fabc'), `type=pkg 时应取 link 字段：${p}`);
+});
+
+test('showIslandNotification 弹完即返回（不阻塞），且两条 PendingIntent 都发出去了', () => {
+    const { sandbox, calls: c } = run({ text: 'x' });
+    const t0 = Date.now();
+    const r = sandbox.showIslandNotification(islandOpts(), null, 3000);
+    const ms = Date.now() - t0;
+
+    assertEq(r, '已发送', '返回值应表示「已发送」');
+    // ⚠️ 3000ms 的超时是原来的阻塞时长；现在必须**立刻**返回。
+    //    留 500ms 余量（CI 机器慢），真阻塞的话是 3000ms，分得很开。
+    assert(ms < 500, `应立刻返回，实际 ${ms}ms（是不是又在等点击？）`);
+    assertEq(c.notify.length, 1, '应该发了 1 条通知');
+
+    const broadcasts = c.pending.filter((p) => p.kind === 'broadcast');
+    assertEq(broadcasts.length, 2, '主体 + 按钮两条 PendingIntent 都该是 broadcast');
+
+    // 两条的 action 必须都是那个固定常量
+    for (const b of broadcasts) {
+        assertEq(b.intent._action, 'com.chaomixian.vflow.fluidcloud.CLICK', 'action 不对');
+        assertEq(b.intent._package, 'com.chaomixian.vflow', 'setPackage 没设对（应该是 vFlow 的包名）');
+    }
+    // ⚠️⚠️ 两条的 (requestCode, data) 必须都不同 —— 否则系统会把它们当成同一个
+    //    PendingIntent，表现是「点按钮变全屏」，**不报错**。见 createClickBroadcastIntent。
+    const [a, b] = broadcasts;
+    assert(a.requestCode !== b.requestCode, `两条 requestCode 相同（${a.requestCode}）—— 会互相顶掉`);
+    assert(String(a.intent._data) !== String(b.intent._data), '两条 data 相同 —— 会互相顶掉');
+    // 主体是全屏、按钮是小窗（与 resultOnClick / resultOnButton 对应）
+    assert(String(a.intent._data).includes('act=fullscreen'), `主体应是 fullscreen：${a.intent._data}`);
+    assert(String(b.intent._data).includes('act=window'), `按钮应是 window：${b.intent._data}`);
+});
+
+test('没有 openWith 的（多链接）走浮窗 —— 它需要脚本继续参与，回传做不到', () => {
+    // ⚠️ 这是**有意退化的行为**：多链接的岛点击后要弹选择框、再走识别链路，
+    //    脚本必须还在等 —— 而脚本已经不当接收方了 ⇒ 只能走浮窗
+    //    （浮窗的点击是 View.OnClickListener，接口，不炸，且能继续等待）。
+    const core = readSrc('core.js');
+    const body = core.slice(core.indexOf('function showFloatingPrompt'), core.indexOf('function showFluidCloud'));
+    assert(/opts\.openWith/.test(body), 'showFloatingPrompt 没有按 openWith 分流 —— 多链接会被送进岛路径然后卡死');
+});
+
+// ===========================================================================
+console.log('\n[9] 项目结构（架构调整后的不变量）');
 // ===========================================================================
 
 // ⚠️ 本节锁的是 **2026-10-07 架构调整**（DESIGN.md §3.5）之后的形态。

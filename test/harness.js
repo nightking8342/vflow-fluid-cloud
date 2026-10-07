@@ -41,6 +41,9 @@ const calls = {
     shell: [],
     notify: [],
     startActivity: [],
+    // 每次 `PendingIntent.getActivity/getBroadcast` 记一条
+    // （2026-10-07 起 `requestCode` 是契约的一部分，必须能断言）
+    pending: [],
     log: []
 };
 
@@ -442,6 +445,26 @@ function installAndroid(sandbox, opts) {
         };
     };
 
+    /**
+     * ⚠️⚠️ **必须真实现** —— 不能 no-op。
+     *
+     * 它是 2026-10-07「点击交给工作流」那批改动新引入的（`buildClickPayload`）：
+     * 把链接编码进广播的 `data` URI。链接里**本来就有 `?` 与 `&`**，
+     * 不编码会被 URI 解析器吃掉 ⇒ 工作流侧拿到的 URL 是**截断的**。
+     *
+     * 若把它 stub 成恒等函数，测试里「编码了没有」永远看不出来
+     * （编码前后都是同一个字符串）—— 而那正是本改动最容易悄悄写错的地方。
+     */
+    const uriStub = {
+        parse: (s) => ({
+            _s: String(s),
+            toString: () => String(s),
+            getScheme: () => String(s).split(':')[0],
+            getHost: () => (String(s).split('//')[1] || '').split('?')[0],
+            getQuery: () => (String(s).split('?')[1] || null),
+        })
+    };
+
     const notificationManager = {
         createNotificationChannel() {},
         notify(id, n) { calls.notify.push({ id, notification: n }); },
@@ -466,6 +489,10 @@ function installAndroid(sandbox, opts) {
             return anyObject(`Service(${n})`);
         },
         getPackageManager: () => packageManager,
+        // ⚠️ 2026-10-07 起必须真实现（不能落到 `anyObject` 万能 stub）——
+        //    广播回传用 `context.getPackageName()` 给 `intent.setPackage(...)` 精确寻址，
+        //    返回一个万能 stub 的话「有没有设对包名」测不出来。
+        getPackageName: () => 'com.chaomixian.vflow',
         createPackageContextAsUser: () => ({ getPackageManager: () => packageManager }),
         startActivity(i) { calls.startActivity.push(i); },
         startActivityAsUser(i) { calls.startActivity.push(i); },
@@ -555,8 +582,17 @@ function installAndroid(sandbox, opts) {
             NotificationManager: { IMPORTANCE_HIGH: 4, IMPORTANCE_DEFAULT: 3 },
             NotificationChannel: class { constructor(id, name, imp) { this.id = id; } },
             PendingIntent: {
-                getActivity: () => ({ __pending: 'activity' }),
-                getBroadcast: () => ({ __pending: 'broadcast' }),
+                // ⚠️ **必须记录 `(requestCode, intent)`** —— 2026-10-07 的改动里
+                //    `requestCode` 是**契约的一部分**（固定 action 后靠它区分每条通知，
+                //    见 `createClickBroadcastIntent` 的注释）。不记录就测不出它。
+                getActivity: (ctx, rc, intent) => {
+                    calls.pending.push({ kind: 'activity', requestCode: rc, intent });
+                    return { __pending: 'activity', requestCode: rc, intent };
+                },
+                getBroadcast: (ctx, rc, intent) => {
+                    calls.pending.push({ kind: 'broadcast', requestCode: rc, intent });
+                    return { __pending: 'broadcast', requestCode: rc, intent };
+                },
                 FLAG_UPDATE_CURRENT: 1, FLAG_IMMUTABLE: 2
             },
             ActivityManager: { RunningAppProcessInfo: { IMPORTANCE_FOREGROUND: 100 } },
@@ -612,7 +648,7 @@ function installAndroid(sandbox, opts) {
             Icon: { createWithBitmap: () => ({ __icon: 'bitmap' }) }
         },
         util: { DisplayMetrics: displayMetrics },
-        net: { Uri: { parse: (s) => ({ toString: () => String(s) }) } },
+        net: { Uri: uriStub },
         text: { InputType: { TYPE_CLASS_TEXT: 1, TYPE_TEXT_FLAG_MULTI_LINE: 0x2000 } },
         'view.inputmethod': {}
     };

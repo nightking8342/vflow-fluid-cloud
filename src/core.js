@@ -673,12 +673,26 @@ function showFloatingPrompt(opts) {
     var result = null;
     var timeout = opts.timeout || 3000;
     var useNotification = config.use_islandNotification || false;
-    if (useNotification) {
+    // 【vflow】⚠️⚠️ 广播回传**只支持「有 openWith 的终结动作」**
+    //          （岛上的主体/按钮 = 打开一个链接，然后结束）。
+    //
+    // 没有 openWith 的（如多链接的「点击选择链接」，`ManyLink_Fluid_Cloud`）
+    // 需要**脚本继续参与**（点击后要弹选择框、再走识别链路）——
+    // 而脚本已经不当接收方了（`new BroadcastReceiver` 在 vFlow 里必然抛），
+    // 这类场景**做不到回传** ⇒ **一律走浮窗**。
+    //
+    // ⚠️ 浮窗路径的点击是脚本自己的 `View.OnClickListener`（`core.js:874`）——
+    //    那是**接口**，走 `java.lang.reflect.Proxy`，**不涉及子类化，本来就不炸**，
+    //    而且能继续等待（`while (result === null)`）。
+    //
+    // ⚠️ **代价（如实记录）**：`use_islandNotification = true` 时，
+    //    **多链接场景会从「岛」退化成「浮窗」**。要恢复它，得把「选择」本身
+    //    也搬进工作流（见 DESIGN.md §4.6 的 A/B 两类交互）。**本轮不做。**
+    if (useNotification && opts.openWith && VFLOW_CLICK_BROADCAST) {
         return showIslandNotification(opts, result, timeout);
-    } else {
-        // 否则显示浮窗提示
-       return showFluidCloud(opts, result, timeout);
     }
+    // 否则显示浮窗提示
+    return showFluidCloud(opts, result, timeout);
 }
 function showFluidCloud(opts, result, timeout) {
     function runOnUiThread(fn) {
@@ -1856,56 +1870,45 @@ function showIslandNotification(opts, result, timeout) {
         }
         // 生成唯一通知ID
         var notificationId = java.lang.System.currentTimeMillis() & 0x7fffffff;
-        // 定义广播动作
-        const ACTION_CLICK_MAIN = "FLUID_CLOUD_CLICK_MAIN_" + notificationId;
-        const ACTION_CLICK_BUTTON = "FLUID_CLOUD_CLICK_BUTTON_" + notificationId;
-        // 导入WeakReference类
-        var WeakReference = java.lang.ref.WeakReference;
-        // 创建广播接收器
-        var receiver = new BroadcastReceiver({
-            onReceive: function(context, intent) {
-                var action = intent.getAction();
-                if (action == ACTION_CLICK_MAIN) {
-                    result = opts.resultOnClick || "fullscreen";
-                } else if (action == ACTION_CLICK_BUTTON) {
-                    result = opts.resultOnButton || "window";
-                }
-                NotificationManager.cancel(notificationId);
-                // 从WeakReference中获取并注销接收器
-                var receiverRef = this.receiverRef;
-                if (receiverRef && receiverRef.get()) {
-                    try { 
-                        context.unregisterReceiver(receiverRef.get()); 
-                    } catch (e) {}
-                }
-            }
-        });
-        // 使用WeakReference持有接收器
-        var receiverRef = new WeakReference(receiver);
-        receiver.receiverRef = receiverRef;
-        // 注册广播接收器
-        var filter = new IntentFilter();
-        filter.addAction(ACTION_CLICK_MAIN);
-        filter.addAction(ACTION_CLICK_BUTTON);
-        context.registerReceiver(receiver, filter);
-        // 创建主体点击的 PendingIntent
+        // 【vflow】点击交给工作流（不再自己 new BroadcastReceiver —— 那行在 vFlow 里必然抛）。
+        //          详见本文件顶部的「点击交给工作流 —— 广播回传」注释块。
+        //          ⚠️ 两条 PendingIntent 的 requestCode 与 data 都不同 —— 见
+        //             `createClickBroadcastIntent` 的注释（PendingIntent 的等价判据含
+        //             requestCode + data，两条若全同会互相顶掉，表现是「点按钮变全屏」）。
         var mainIntent;
         var mainPendingIntent;
-        if (pull_small_window && openWith) {
+        var buttonPendingIntent;
+        if (VFLOW_CLICK_BROADCAST && openWith) {
+            // 主体点击 = 全屏打开；按钮点击 = 小窗打开（与原来 resultOnClick/resultOnButton 一致）
+            var mainAct = opts.resultOnClick || "fullscreen";
+            var buttonAct = opts.resultOnButton || "window";
+            // ⚠️⚠️ **两条必须用【不同的 requestCode】** —— `notificationId + 1` 是按钮。
+            //    两条 PendingIntent 的 data 里只有 `act=` 不同，而 **`requestCode` 与 data
+            //    都参与等价判据**（`PendingIntentRecord.Key.equals`），所以 data 不同本来
+            //    就足以区分；但**再多一道 requestCode 更保险** —— 万一将来有人把 `act`
+            //    从 payload 里去掉，两条就会完全同身份、**按钮静默变成全屏**（不报错）。
+            //    加一不加价。
+            mainPendingIntent = createClickBroadcastIntent(
+                buildClickPayload(openWith, mainAct), notificationId);
+            buttonPendingIntent = createClickBroadcastIntent(
+                buildClickPayload(openWith, buttonAct), notificationId + 1);
+        } else if (pull_small_window && openWith) {
+            // 旧行为（VFLOW_CLICK_BROADCAST=false 时）：主体直接启动 Activity，按钮仍需脚本接收
             mainIntent = createLaunchIntent(openWith);
             mainPendingIntent = PendingIntent.getActivity(
-            context,
-            notificationId,
-            mainIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                context,
+                notificationId,
+                mainIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
             );
+            var fallbackButtonIntent = new Intent(FLUID_CLOUD_ACTION_CLICK);
+            buttonPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackButtonIntent, PendingIntent.FLAG_IMMUTABLE);
         } else {
-            mainIntent = new Intent(ACTION_CLICK_MAIN);
-            mainPendingIntent = PendingIntent.getBroadcast(context, 0, mainIntent, PendingIntent.FLAG_IMMUTABLE);
+            var fallbackMainIntent = new Intent(FLUID_CLOUD_ACTION_CLICK);
+            mainPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackMainIntent, PendingIntent.FLAG_IMMUTABLE);
+            var fallbackButtonIntent2 = new Intent(FLUID_CLOUD_ACTION_CLICK);
+            buttonPendingIntent = PendingIntent.getBroadcast(context, notificationId, fallbackButtonIntent2, PendingIntent.FLAG_IMMUTABLE);
         }
-        // 创建按钮点击的 PendingIntent
-        var buttonIntent = new Intent(ACTION_CLICK_BUTTON);
-        var buttonPendingIntent = PendingIntent.getBroadcast(context, 1, buttonIntent, PendingIntent.FLAG_IMMUTABLE);
         // 获取应用图标用于超级岛
         var appIcon = null;
         if (pkg) {
@@ -1960,25 +1963,21 @@ function showIslandNotification(opts, result, timeout) {
         notification.extras.putString("miui.focus.param", islandParams);
         // 显示通知
         NotificationManager.notify(notificationId, notification);
-        new Thread(new Runnable({
-        run: function() {
-            Thread.sleep(timeout);
-            if (result === null) {
-                result = opts.resultOnTimeout || "取消";
-            }
-            NotificationManager.cancel(notificationId);
-            // 从WeakReference中获取并注销接收器
-            if (receiverRef && receiverRef.get()) {
-                try { 
-                    context.unregisterReceiver(receiverRef.get()); 
-                } catch (e) {}
-            }
-        }
-    })).start();
-    while (result === null) {
-        Thread.sleep(150);
-    }
-    return result;
+
+        // 【vflow】不再等待点击 —— 弹完就返回。
+        //
+        // 原来这里是：
+        //     new Thread(new Runnable({ run: function() { Thread.sleep(timeout); … } })).start();
+        //     while (result === null) { Thread.sleep(150); }     // ← 阻塞 Fluid_Cloud_timeout 毫秒
+        //     return result;
+        //
+        // 点击现在由**工作流**处理（广播触发器），脚本不参与 ⇒ **不需要等待**。
+        // ⚠️ 顺带去掉的还有那段「超时线程」：它内部也在 `result` / `unregisterReceiver` 上，
+        //    receiver 删了之后那两句已经没有语义（unregister 会抛，被 try/catch 吞掉 ⇒ 静默空转）。
+        // ⚠️ **代价：超时自动收岛没了。** 通知会一直留到用户点它或划掉。
+        //    岛自身的超时由 `param_island.islandTimeout`（上面 buildIslandParams 里写了 10）
+        //    承担 —— ⚠️ **该字段的实际效果未在真机验证过**（见 DESIGN.md §4.6 的未决项 0b）。
+        return "已发送";
 }
 // 构建超级岛参数
 function buildIslandParams(title, content, buttonText) {
@@ -2098,6 +2097,146 @@ function getBitmapFromDrawable(drawable) {
     drawable.draw(canvas);
     return bitmap;
 }
+// ════════════════════════════════════════════════════════════════════════════
+// 【vflow】点击交给工作流 —— 广播回传（2026-10-07）
+//
+// ## 为什么要有这一段
+//
+// 原实现用 `new BroadcastReceiver({...})` 自己接收按钮点击。**在 vFlow 里这行必然抛**：
+//
+//     实例化错误 (can't load this type of class file)：
+//     类 android.content.BroadcastReceiver 是接口或抽象类
+//
+// 真因是 vFlow 的 `ContextFactory` 没覆写 `createClassLoader`（见 DESIGN.md §4.6）。
+//
+// ## 改法：脚本只【发】广播，不当接收方
+//
+// 「发送」是脚本的活，「接收 + 执行」是工作流的活。按钮的 PendingIntent 本来就是
+// `getBroadcast` —— 系统只负责发，谁收是另一件事。
+//
+// 附带好处：**不再阻塞**。原来 `while (result === null) { Thread.sleep(150); }`
+// 会把工作流线程占住 `Fluid_Cloud_timeout`（默认 3000ms）。
+//
+// ## ⚠️ 只覆盖「终结动作」，不覆盖「选择」
+//
+// 岛上的按钮点一下 = 打开一个链接，**然后结束** ⇒ 工作流接了就能干完。
+// 而「多链接选择」「打开方式选择」那类框是**脚本自己画的浮窗**（`View.OnClickListener`
+// 走 Proxy，本来就不炸），结果要写回脚本的局部变量继续跑 —— 那个**没法用广播回传**。
+// ⇒ 本函数只服务前者；后者仍走自绘浮窗（见 DESIGN.md §4.6 的 A/B 两类）。
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 点击回传的广播地址。
+ *
+ * ⚠️⚠️ **这两个常量必须与工作流里配的完全一致，且都是【写死的常量】。**
+ *    原实现是 `"FLUID_CLOUD_CLICK_BUTTON_" + notificationId`（运行期拼的），
+ *    而 vFlow 广播触发器的 `actions` 参数**不接受变量**（`IntentFilter` 在
+ *    工作流注册期就固定了）⇒ **不能带任何运行期后缀**。
+ *
+ * ⚠️ 那「怎么区分是哪一次点击」？靠 **`data` 里的载荷**，不靠 action。
+ */
+var FLUID_CLOUD_ACTION_CLICK = "com.chaomixian.vflow.fluidcloud.CLICK";
+
+/** `data` 的 scheme —— 工作流那边要填 `addDataScheme("vflowfc")` 才能收到。 */
+var FLUID_CLOUD_DATA_SCHEME = "vflowfc";
+
+/** 点击回传的开关（默认开）。关掉时退回旧的自绘浮窗行为。 */
+var VFLOW_CLICK_BROADCAST = true;
+
+/**
+ * 把「这次点击要做什么」编码成 `data` 的 URI。
+ *
+ * 形如：`vflowfc://click?act=window&pkg=tv.danmaku.bili&uid=0&type=url&url=<编码后的链接>`
+ *
+ * ## ⚠️ 为什么放 `data` 而不是 `extras`
+ *
+ * | | `extras` | `data` |
+ * |---|---|---|
+ * | 预算 | ⚠️ **8 KiB**（`BroadcastTriggerHandler.MAX_EXTRAS_JSON_BYTES`） | ✅ **无**（`dataUri = intent.dataString` 原样输出） |
+ * | 精确寻址 | 不行 | ✅ `addDataScheme("vflowfc")` 能把别的 App 发来的同 action 广播卡掉 |
+ *
+ * 实测一条典型载荷约 166 字节，`extras` 其实**装得下**（25 倍余量）——
+ * 选 `data` 是因为**寻址与过滤**，不是因为容量。
+ *
+ * ## ⚠️ `url` 必须编码
+ *
+ * 链接里**本来就有 `?` 与 `&`**（如 `…/video/BV1xx?share_source=copy_web&vd_source=…`），
+ * 不编码会被 URI 解析器**吃掉**（`&` 之后的段变成新的 query 参数）。
+ * `encodeURIComponent` 的代价很小（实测 92 → 110 字节，1.20×），
+ * 换来「解析绝不会错」。
+ */
+function buildClickPayload(openWith, act) {
+    // ⚠️ `act` 决定打开方式，`type` 决定链接怎么解析（与 launchWithMode 的两个入参对应）
+    var type = openWith.type || "url";
+    // ⚠️ 与 OpenMain 里 launchWithMode 的取值口径一致：
+    //    type=url/intent 用 urlsharme；type=pkg 用 link（见 core.js 的 launchWithMode 调用点）
+    var raw = (type === "pkg") ? openWith.link : openWith.urlsharme;
+    var qs = [
+        "act=" + encodeURIComponent(String(act || "fullscreen")),
+        "pkg=" + encodeURIComponent(String(openWith.pkg || "")),
+        "uid=" + encodeURIComponent(String(openWith.UserId == null ? 0 : openWith.UserId)),
+        "type=" + encodeURIComponent(String(type)),
+        "url=" + encodeURIComponent(String(raw == null ? "" : raw))
+    ];
+    return FLUID_CLOUD_DATA_SCHEME + "://click?" + qs.join("&");
+}
+
+/**
+ * 造一个「点击就发广播」的 `PendingIntent`。
+ *
+ * ## ⚠️⚠️ `requestCode` 必须让每条通知、每条通道都不同
+ *
+ * `PendingIntent` 的等价判据在系统侧是 **`PendingIntentRecord.Key.equals`**
+ * （AOSP `services/core/java/com/android/server/am/PendingIntentRecord.java`，已逐字核实）：
+ *
+ * ```
+ * type / userId / packageName / featureId / activity / who /
+ * requestCode / requestIntent.filterEquals / requestResolvedType / flags
+ * ```
+ *
+ * 而 `Intent.filterEquals`（`Intent.java:11837`，已逐字核实）比的是：
+ * **`mAction / mData / mType / mIdentifier / mPackage / mComponent / mCategories`**
+ * —— **比较 `data`，不比较 `extras`，也不比较 `flags`**。
+ *
+ * ⇒ **改这个函数时最容易踩的两个坑**（两个都不报错、都不崩）：
+ *
+ * | 坑 | 后果 |
+ * |---|---|
+ * | **`requestCode` 写死 + `data` 里只有 `act` 不同** | 两条 PendingIntent 仍不同（data 参与判据）⇒ 侥幸能跑。但**一旦有人把 `act` 从 payload 去掉**，两条就完全同身份 ⇒ **按钮静默变成全屏** |
+ * | **`requestCode` 写死 + 跨通知也相同**（`data` 也相同） | 第二条通知的 `getBroadcast` **命中第一条**；本函数**没带 `FLAG_UPDATE_CURRENT`**（`FLAG_IMMUTABLE` 不含它）⇒ `getIntentSender` 命中已有 Key 时**直接返回旧记录**（`PendingIntentController.java:167-180`）⇒ **点第二条的按钮，打开的是第一条的链接** |
+ *
+ * ⇒ **两道保险都上**：`requestCode` 用 `notificationId`（每条通知不同）、
+ *    按钮那条用 `notificationId + 1`（同一通知内两条通道不同）。
+ *
+ * @param data 由 [buildClickPayload] 造出的 URI 字符串
+ * @param requestCode ⚠️ **必须每条通知、每条通道都不同**
+ */
+function createClickBroadcastIntent(data, requestCode) {
+    // ⚠️ 类名在函数内**显式取一次**（照 createLaunchIntent 的写法）——
+    //    `importPackage(android.content)` 注册的短名在 Rhino 里未必解析得到，
+    //    而 `PendingIntent` 是 showIslandNotification 里的**局部变量**，本函数够不到。
+    var Intent = android.content.Intent;
+    var Uri = android.net.Uri;
+    var PendingIntent = android.app.PendingIntent;
+
+    var intent = new Intent(FLUID_CLOUD_ACTION_CLICK);
+    intent.setData(Uri.parse(data));
+    // ⚠️ 显式指定接收者（vFlow 自己）—— 把「任意 App 可伪造」收窄成
+    //    「必须知道包名 + action + scheme 形状」。
+    //    脚本本来就跑在 vFlow 里，`getPackageName()` 直接就有，**不是硬编码**。
+    try {
+        intent.setPackage(context.getPackageName());
+    } catch (e) {
+        console.log("设置广播接收包名失败（将退化为隐式广播）：" + e);
+    }
+    return PendingIntent.getBroadcast(
+        context,
+        requestCode,
+        intent,
+        PendingIntent.FLAG_IMMUTABLE
+    );
+}
+
 // 创建启动Intent
 function createLaunchIntent(openWith) {
     try {

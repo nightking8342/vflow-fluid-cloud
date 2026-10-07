@@ -717,7 +717,7 @@ public Class<?> defineClass(String name, byte[] data) {
 | action（按钮） | `FLUID_CLOUD_CLICK_BUTTON_<notificationId>` | 同上 |
 | **extras** | ⚠️ **一个都没有** | `new Intent(action)`，数据全在**脚本的闭包变量**（`opts` / `result`）里 |
 | package / component | ⚠️ **都没设** ⇒ **隐式广播** | 靠 action 唯一性 + 随机后缀避免被别人匹配到 |
-| requestCode | 主体 `0` / 按钮 `1`（`core.js:1897` / `:1906`） | ⚠️ 写死的 —— 见「契约 C」 |
+| requestCode | 主体 `0` / 按钮 `1`（`core.js` 原文） | ⚠️ **写死的** —— 见「契约 C」 |
 | flags | 主体 `FLAG_UPDATE_CURRENT \| FLAG_IMMUTABLE`；按钮只有 `FLAG_IMMUTABLE` | ⚠️ 按钮那个**不含** `UPDATE_CURRENT` |
 | 接收方 | 脚本自己的 `new BroadcastReceiver`（`core.js:1863`） | **这正是撞墙的地方** |
 
@@ -752,7 +752,7 @@ public Class<?> defineClass(String name, byte[] data) {
 |---|---|---|
 | 1 | **删掉 `new BroadcastReceiver`**（`core.js:1863`）与 `registerReceiver` | 整段消失 —— 这正是撞墙的地方 |
 | 2 | **删掉 `while (result === null) { Thread.sleep(150); }` 那几处**（`core.js:1976`（岛）/ `:799`（浮窗）/ `:942`（对话框）） | 不再等回传 ⇒ **不再阻塞** |
-| 3 | 按钮的 `PendingIntent` 改成**固定 action + 带 extras** | 把「打开哪个链接 / 全屏还是小窗」装进 extras。⚠️ **`requestCode` 必须改成 `notificationId`**（契约 C） |
+| 3 | 两条 `PendingIntent` 都改成**固定 action + 带 `data` 载荷** | `data` 里装「打开哪个链接 / 全屏还是小窗」。⚠️ **`requestCode` 主体用 `notificationId`、按钮用 `+1`**（契约 C） |
 | 4 | **清理「超时线程」那一段**（`core.js:1961`） | ⚠️ **容易漏**：它也在 `result` / `unregisterReceiver` 上（`if (result === null)` + `receiverRef.get()`）。receiver 删了之后，这两句的语义全没了 —— 见下 |
 
 ⚠️ **第 4 条不是「顺手清理」，漏了会静默出问题**：那段线程在 `timeout` 之后
@@ -765,6 +765,25 @@ public Class<?> defineClass(String name, byte[] data) {
 （`core.js:1961`，实测矩阵第 6/7 条）。**别指望它能用** ——
 若决定保留超时收岛，先确认它在真机上真的会跑。
 
+##### ✅ 实施状态（2026-10-07）：**已改完，未上真机**
+
+脚本侧（`src/core.js`）已按本方案改完，改动集中在四处：
+
+| 位置 | 改动 |
+|---|---|
+| 文件顶部新增注释块 | 说明为什么改、只覆盖哪类场景（A 类） |
+| 新增 `buildClickPayload` / `createClickBroadcastIntent` | 载荷编码 + PendingIntent 构造（在 `createLaunchIntent` 之前） |
+| `showIslandNotification` | 删掉 receiver 段与等待循环；两条 PendingIntent 改成广播；`return "已发送"` |
+| `showFloatingPrompt` | 加 `opts.openWith` 分流（没有 openWith 的走浮窗 —— 见「A/B 两类」） |
+
+⚠️ **`VFLOW_CLICK_BROADCAST`（`src/core.js` 顶部）是回退开关**，默认 `true`。
+置 `false` 时退回旧行为（主体 `getActivity`、按钮仍走广播但没人接）——
+它是**排查用的**，不是长期配置项。
+
+⚠️ **配套的工作流改动（加广播触发器 + 处理步骤）尚未做** ——
+脚本现在发出去的广播**还没有人接**。⇒ 在配上触发器之前，**点岛不会有任何反应**
+（这是**预期的**，不是缺陷）。
+
 ##### ⚠️⚠️ 三条必须同时成立的契约（漏任一条都是**静默失效**）
 
 **契约 A：脚本发的 action 必须与工作流里配的完全一致。**
@@ -775,7 +794,7 @@ public Class<?> defineClass(String name, byte[] data) {
 ⇒ **不能带任何运行期后缀**，必须是**写死的常量**。
 
 ⚠️ 原实现带后缀是有原因的（避免与上一次的点击串台）。改成固定 action 后，
-这个「串台」问题**必须由契约 C 解决** —— 而不是靠 extras（见下）。
+这个「串台」问题**必须由契约 C 解决** —— 判据是 `requestCode` + `data`，而**不是 extras**（见下）。
 
 **契约 B：点击时「要做什么」必须跟着广播走，不能靠「最近一次」。**
 
@@ -835,36 +854,70 @@ vflowfc://click?act=window&pkg=tv.danmaku.bili&uid=0&type=url&url=<encodeURIComp
 ⇒ 拼 `am start` 命令给 `vflow.shizuku.shell_command`（全屏用
 `am start --windowingMode 1`，小窗用 `--windowingMode 5` —— 两者共用一条命令）。
 
-**契约 C（⚠️ 最容易漏的一条）：`PendingIntent` 的 requestCode 必须每条通知不同。**
+**契约 C（⚠️ 最容易漏的一条）：`PendingIntent` 的 `requestCode` 必须让每条通知、每条通道都不同。**
 
-`PendingIntent` 的身份是 **`(requestCode, Intent 的 filterEquals)`**，而
-**`filterEquals` 不比较 extras** —— 官方文档逐字：
+> ⚠️ **本节初稿把等价判据写错了** —— 初稿说「`filterEquals` **不**比较 `data`」，
+> 依据是官方文档的 `PendingIntent` 页面。**去 AOSP 源码逐字核实后发现那是错的**：
+> `filterEquals` **比较 `data`**。判据与结论都已在下面更正（`data` 参与判据这件事，
+> 恰好是「两条 PendingIntent 不会互相顶掉」的原因；但它**不够保险**，见下）。
 
-> *"the PendingIntent will be considered equal to another PendingIntent if the
-> Intent is 'equal' to it (via `Intent.filterEquals`), and the requestCode is the same"*
+**真正的等价判据**（系统侧，不是 `Intent.equals`）：
 
-现在是「action 唯一」⇒ 每条通知的按钮 PendingIntent 天然不同。
-一旦 **action 固定 + requestCode 还是写死的 `1`** ⇒ 第二条通知的 `getBroadcast`
-会**命中第一条**；而没带 `FLAG_UPDATE_CURRENT` 时**旧 extras 原样保留、新的被忽略**
-（`core.js:1906` 用的正是 `FLAG_IMMUTABLE`，不含 `UPDATE_CURRENT`）
-⇒ **点第二条的按钮，打开的是第一条的链接。**
+```java
+// services/core/java/com/android/server/am/PendingIntentRecord.java
+// final static class Key.equals —— 已逐字核实（android16-release）
+type / userId / packageName / featureId / activity / who /
+requestCode / requestIntent.filterEquals / requestResolvedType / flags
+```
 
-⇒ 解法：**action 固定（契约 A 要求）+ `requestCode` 用 `notificationId`**。
-官方文档给的建议就是这个：
+```java
+// core/java/android/content/Intent.java:11837 —— 已逐字核实
+public boolean filterEquals(Intent other) {
+    ... mAction / mData / mType / mIdentifier / mPackage / mComponent / mCategories ...
+}
+// ⇒ **比较 data**；不比较 extras；**也不比较 flags**
+```
 
-> *"you will need to ensure there is something that is different about them …
-> This may be any of the Intent attributes considered by `Intent.filterEquals`,
-> or different request code integers supplied to … `getBroadcast`"*
+**命中已有 Key 时的处置**（`services/core/java/com/android/server/am/PendingIntentController.java:167-180`）：
 
-⚠️ **这条不会报错、不会崩** —— 表现是「偶尔点错了链接」，而且**只在同时存在两个岛时**才复现。
+```java
+if (!cancelCurrent) {
+    if (updateCurrent) { rec.key.requestIntent.replaceExtras(...); }  // ⚠️ 只换 extras，不换 data
+    return rec;                                                        // ← 没带 UPDATE_CURRENT 就直接返回旧的
+}
+```
+
+⇒ **两个坑，都是静默的**：
+
+| 坑 | 后果 |
+|---|---|
+| `requestCode` 写死 + **两条通道（主体/按钮）的 `data` 只差 `act=`** | 侥幸能跑（`data` 参与判据）。但**一旦有人把 `act` 从 payload 去掉**，两条就完全同身份 ⇒ **点按钮变全屏** |
+| `requestCode` 写死 + **跨通知也相同**（`data` 也相同） | 第二条通知命中第一条，**直接返回旧记录**（本实现没带 `FLAG_UPDATE_CURRENT`）⇒ **点第二条的按钮，打开的是第一条的链接** |
+
+⚠️ **两条都不会报错、不会崩**。后者的表现是「偶尔点错了链接」，**只在同时存在两个岛时**才复现 ——
 单条链路的验收**测不出来**。
+
+⇒ **解法（两道保险都上）**：
+
+| 通道 | `requestCode` | `data` |
+|---|---|---|
+| 主体（全屏） | `notificationId` | `…&act=fullscreen&…` |
+| 按钮（小窗） | **`notificationId + 1`** | `…&act=window&…` |
+
+跨通知靠 `notificationId` 不同；同通知内两条靠 `+1` 与 `act` 不同。
+`+1` **不加价**，而它挡的是「将来有人动了 payload 结构」这类改动。
+
+⚠️ **不能改用 `FLAG_UPDATE_CURRENT` 来「修」这个** —— 它只 `replaceExtras`，
+**不换 `data`**（见上面的源码），而本方案的载荷恰恰在 `data` 里 ⇒ 换了也没用。
 
 ##### ⚠️ 新攻击面：接收方从「脚本进程内」变成 `EXPORTED`
 
 现在的广播是**隐式**的（没 `setPackage`）、action 带**随机后缀**
-⇒ 别的 App 基本不可能匹配到（`core.js:1858-1859`）。
+⇒ 别的 App 基本不可能匹配到（`core.js` 原文）。
 
-改成固定 action + vFlow 的广播触发器之后，接收方是
+⚠️ **实现在 2026-10-07 补了 `setPackage(context.getPackageName())`** ⇒ 从「隐式」变成
+**显式指向 vFlow**，攻击面比初稿评估的更小（伪造者还要知道包名）。
+但接收方本身仍是
 `ContextCompat.RECEIVER_EXPORTED`（`BroadcastTriggerHandler.kt:262`）
 ⇒ **任何应用都能伪造这条广播**，而 extras 里装的就是「打开哪个链接」。
 
