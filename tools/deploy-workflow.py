@@ -110,10 +110,16 @@ def main():
     #    `adb push` 的第二个参数是**设备路径**，别加盘符前缀。
     r = adb(["push", str(WORKFLOW), DEVICE_PATH], args.serial, check=False)
     out = (r.stdout or "") + (r.stderr or "")
-    if r.returncode != 0 or "1 file pushed" not in out:
-        print("adb push 失败：\n%s" % out, file=sys.stderr)
+    # ⚠️ 判据用**退出码**，不用输出文案 —— adb 的 push 文案逐版本在变
+    #    （`1 file pushed, 0 skipped. …` / `1 file pushed. …`），
+    #    拿文案当判据会在某个版本上突然假红。
+    if r.returncode != 0:
+        print("adb push 失败（退出码 %d）：\n%s" % (r.returncode, out), file=sys.stderr)
         sys.exit(1)
     print("✓ 已推送 → %s" % DEVICE_PATH)
+    if "1 file pushed" not in out:
+        # 不是失败，只是文案不认识 —— 打出来让人能核对。
+        print("  （adb 输出：%s）" % out.strip().replace("\n", " | "))
 
     if args.push_only:
         print("\n现在在 vFlow 里导入它：")
