@@ -60,7 +60,22 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ```
 
 ⚠️ `reference/` 里**没有 `.git`**（那是上游仓库的工作区），`README.md` 是本项目加的
-（说明哪些移植了、哪些没有、为什么）。**除 `README.md` 外，其余文件逐字节等于上游。**
+（说明哪些移植了、哪些没有、为什么）。**除 `README.md` 与下面那份 `.txt` 外，其余文件逐字节等于上游。**
+
+### ⚠️ 唯一一个**不是**上游源码的例外
+
+`reference/ShortX-流体云组件3.7_超级岛版_.txt` —— ShortX 的**规则分享文件**
+（用户在 ShortX 里导出/导入用的格式，不是 GitHub 上的文件）。
+
+**为什么破例收进来**：它是**唯一记录「上游在 ShortX 侧怎么接线」的权威材料** ——
+5 条触发源分别取哪个变量（`{clipboardContent}` / `{selectedText}` /
+`activityIntentUri` 的 `S.url=` / `S.rawUrl=` / `extras["url"]`）、
+`ruleInstanceIdGenerator` 怎么写、错误提示怎么挂，**GitHub 仓库里全都没有**。
+此前这些只能从用户口述与 `core.js` 反推。
+
+⚠️ **同样只读**，且**别把 `3.7` 当成「比 `3.2.3` 新」** —— 两套编号体系不同，
+时间上也几乎重合（2025-12-01 vs 上游 commit 2025-12-02）。
+详情见 `reference/README.md`。
 
 📖 完整对照见 `docs/DESIGN.md` §3.5。
 
@@ -106,6 +121,8 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 │   ├── nolinkrules/      #   2 条无链接规则 ⇒ 已移植到 src/nolinkrules/
 │   ├── onOpen.js         #   223 行，指令启用时执行 ⇒ **未移植**（无对应时机）
 │   ├── update.js         #   647 行，远程更新 ⇒ **未移植**（被 §3.4 那套取代）
+│   ├── ShortX-流体云组件3.7_超级岛版_.txt  # ⚠️ **不是上游源码** —— ShortX 规则分享文件，
+│   │                     #   记录「上游在 ShortX 侧怎么接线」（别处没有）
 │   └── version           #   `3.2.3`（⚠️ 与根目录的 version **不是一回事**）
 ├── src/                  # ✍️ 手写（我们维护的就是这些）
 │   ├── adapter.js        #   平台桥 VFLOW_ADAPTER + 全局变量 + 首次自举

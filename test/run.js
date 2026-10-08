@@ -779,6 +779,45 @@ test('reference/ 是完整的上游镜像，且保持上游原名', () => {
     assertEq(fs.readFileSync(path.join(dir, 'version'), 'utf8').trim(), '3.2.3', '上游版本不对');
 });
 
+test('reference/ 里的 ShortX 规则分享文件在，且是「只读参照」不是构建输入', () => {
+    // ⚠️ 存在理由：这份 `.txt` **不是上游源码**（是 ShortX 的规则分享格式），
+    //    很容易被当成「杂七杂八的附件」删掉。但它记录了**别处没有的东西** ——
+    //    上游在 ShortX 侧是怎么把 5 条触发源接进脚本的
+    //    （`{clipboardContent}` / `{selectedText}` / `activityIntentUri` 的
+    //     `S.url=` / `S.rawUrl=` / `extras["url"]`、`ruleInstanceIdGenerator`…）。
+    const f = path.join(ROOT, 'reference', 'ShortX-流体云组件3.7_超级岛版_.txt');
+    assert(fs.existsSync(f), '缺 ShortX 规则分享文件 —— 「上游怎么接线」的证据丢了');
+
+    const raw = fs.readFileSync(f, 'utf8');
+    // ⚠️ 它有两段：前半规则 JSON、`###------###` 分隔、后半 `{"type":"rule"}`
+    const parts = raw.split('###------###');
+    assertEq(parts.length, 2, '分隔符 `###------###` 不见了（ShortX 分享格式的标志）');
+    assert(parts[1].includes('"type":"rule"'), '分隔符后面应是 {"type":"rule"}');
+
+    const rule = JSON.parse(parts[0]);
+    // 5 条触发源 —— 少一条就说明文件被换成了别的规则
+    assertEq(rule.facts.length, 5, 'facts 应恰有 5 条');
+    const tags = rule.facts.map((x) => x.tag).join(',');
+    assertEq(tags, '剪切板,选中,QQ,微信,附加', `触发源标签不对：${tags}`);
+    // ⚠️ 「怎么取值」才是这份文件的价值所在 —— 锚住那几段取值代码
+    //    （扫整个规则对象，不只看 actions：`ruleInstanceIdGenerator` 在顶层）
+    const whole = JSON.stringify(rule);
+    for (const [what, needle] of [
+        ['剪切板取 {clipboardContent}', '{clipboardContent}'],
+        ['选中取 {selectedText}', '{selectedText}'],
+        ['QQ 抠 S.url=', 'S.url='],
+        ['微信抠 S.rawUrl=', 'S.rawUrl='],
+        ['附加取 extras["url"]', 'getString(\\"url\\")'],
+        ['触发实例 id 生成器', 'ruleInstanceIdGenerator'],
+    ]) {
+        assert(whole.includes(needle), `规则里找不到「${what}」（找的是 ${needle}）`);
+    }
+
+    // ⚠️ **反向锁**：它是参照，不是构建输入 —— `src/` 下不该出现它的任何衍生物
+    assert(!fs.existsSync(path.join(ROOT, 'src', 'ShortX-流体云组件3.7_超级岛版_.txt')),
+        'src/ 不该有这份 .txt —— 它不进构建');
+});
+
 test('reference/ 是完整镜像（未移植的文件也留着，它们是对照基线）', () => {
     // ⚠️ 存在理由：`onOpen.js` / `update.js` **都没移植**，很容易被当成
     //    「没用的素材」删掉。但它们的用途**不是**「将来要用」，而是**对照基线** ——

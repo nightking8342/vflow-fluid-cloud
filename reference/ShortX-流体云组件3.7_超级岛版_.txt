@@ -1,0 +1,276 @@
+{
+  "facts": [{
+    "@type": "type.googleapis.com/ClipboardContentChanged",
+    "tag": "剪切板",
+    "customContextDataKey": {
+    },
+    "id": "F-fea75e42-216c-4c0d-8b64-053473d03c29"
+  }, {
+    "@type": "type.googleapis.com/OnMenuActionTrigger",
+    "tag": "选中",
+    "customContextDataKey": {
+    },
+    "id": "F-91891829-9cbb-443f-a585-1243c562701f"
+  }, {
+    "@type": "type.googleapis.com/ActivityStarted",
+    "components": [{
+      "pkg": {
+        "pkgName": "com.tencent.mobileqq"
+      },
+      "className": "com.tencent.mobileqq.activity.QQBrowserActivity"
+    }],
+    "tag": "QQ",
+    "customContextDataKey": {
+    },
+    "id": "F-29ee17fb-43ed-48cf-9fee-a8a90ce4bbe6"
+  }, {
+    "@type": "type.googleapis.com/ActivityStarted",
+    "components": [{
+      "pkg": {
+        "pkgName": "com.tencent.mm"
+      },
+      "className": "com.tencent.mm.plugin.webview.ui.tools.MMWebViewUI"
+    }],
+    "tag": "微信",
+    "customContextDataKey": {
+    },
+    "id": "F-d553b166-110e-48c1-9e36-2646593e7c8b"
+  }, {
+    "@type": "type.googleapis.com/Broadcast",
+    "actions": ["com.nyehueh.fluidcloud.ACTION_URL_RECEIVED"],
+    "tag": "附加",
+    "customContextDataKey": {
+    },
+    "id": "F-c2e6fd88-c8e5-4da4-9269-f93776caa2e5"
+  }],
+  "actions": [{
+    "@type": "type.googleapis.com/SwitchCase",
+    "case": [{
+      "case": [{
+        "@type": "type.googleapis.com/RequireFactTag",
+        "tag": "剪切板",
+        "customContextDataKey": {
+        },
+        "id": "C-9bbcfe49-ac59-42ea-8e3d-729708193a1d"
+      }],
+      "action": [{
+        "@type": "type.googleapis.com/ReplaceRegex",
+        "string": "{clipboardContent}",
+        "regex": "\\{|\\}|`|\\\\",
+        "replacement": " ",
+        "customContextDataKey": {
+        },
+        "id": "A-4c8ee740-4d22-4407-9a61-d169e4f38585"
+      }],
+      "description": "剪切板",
+      "id": "Case-ccfa5d78-bcb8-4685-9139-8956c644720b",
+      "isBreak": true
+    }, {
+      "case": [{
+        "@type": "type.googleapis.com/RequireFactTag",
+        "tag": "选中",
+        "customContextDataKey": {
+        },
+        "id": "C-e346ad10-b180-4332-928d-282c8c7b2afe"
+      }],
+      "action": [{
+        "@type": "type.googleapis.com/ReplaceRegex",
+        "string": "{selectedText}",
+        "regex": "\\{|\\}|`|\\\\",
+        "replacement": " ",
+        "customContextDataKey": {
+        },
+        "id": "A-4c8ee740-4d22-4407-9a61-d169e4f38585"
+      }],
+      "description": "选中",
+      "id": "Case-d5c848e9-70e2-48cb-bc36-13640c4af685",
+      "isBreak": true
+    }, {
+      "case": [{
+        "@type": "type.googleapis.com/RequireFactTag",
+        "tag": "QQ",
+        "customContextDataKey": {
+        },
+        "id": "C-86cd7c57-a54b-4c20-9e62-bc3121266cfc"
+      }],
+      "action": [{
+        "@type": "type.googleapis.com/ExecuteJS",
+        "expression": "var text \u003d activityIntentUri;\nvar pattern \u003d /S.url\u003d(.*?);/;   \nvar match \u003d text.match(pattern);\nif (match) {\n    var result \u003d match[1];  \n    decodeURIComponent(result);\n}else \"nolink\"",
+        "customContextDataKey": {
+          "keys": [{
+            "first": "jsRet",
+            "second": "replaceResult"
+          }]
+        },
+        "id": "A-7d834ab6-8b01-4e81-a0d9-002c30d8d2fd"
+      }],
+      "description": "QQ",
+      "id": "Case-05133f5c-8afa-4bee-95bc-a95f26fac9a8",
+      "isBreak": true
+    }, {
+      "case": [{
+        "@type": "type.googleapis.com/RequireFactTag",
+        "tag": "微信",
+        "customContextDataKey": {
+        },
+        "id": "C-d229e146-e2a7-4bfb-9d11-ea49d01fe14a"
+      }],
+      "action": [{
+        "@type": "type.googleapis.com/ExecuteJS",
+        "expression": "var text \u003d activityIntentUri;\nvar pattern \u003d /S.rawUrl\u003d(.*?);/;   \nvar match \u003d text.match(pattern);\nif (match) {\n    var result \u003d match[1];  \n    decodeURIComponent(result);\n}else \"nolink\"",
+        "customContextDataKey": {
+          "keys": [{
+            "first": "jsRet",
+            "second": "replaceResult"
+          }]
+        },
+        "id": "A-7d834ab6-8b01-4e81-a0d9-002c30d8d2fd"
+      }],
+      "description": "微信",
+      "id": "Case-75808f47-fa2c-4b57-a09a-23f74fae07f1",
+      "isBreak": true
+    }, {
+      "case": [{
+        "@type": "type.googleapis.com/RequireFactTag",
+        "tag": "附加",
+        "customContextDataKey": {
+        },
+        "id": "C-0b80e4eb-198c-40af-806b-43b6565c07c5"
+      }],
+      "action": [{
+        "@type": "type.googleapis.com/ExecuteMVEL",
+        "expression": "import android.content.Intent;\nimport android.os.Bundle;\nresult \u003d \"\";\nextras \u003d intent.getExtras();\nif (extras !\u003d null) {\n    if (extras.containsKey(\"url\")) {\n        result +\u003d extras.getString(\"url\");\n    }\n} else {\n    result +\u003d \"nolink.\\n\";\n}\nreturn result;",
+        "customContextDataKey": {
+          "keys": [{
+            "first": "mvelRet",
+            "second": "replaceResult"
+          }]
+        },
+        "id": "A-fc9074c7-bced-45f7-ab17-a492fe627a2f"
+      }],
+      "description": "附加",
+      "id": "Case-d9abc841-3208-41bc-80d5-58e9733bf64a",
+      "isBreak": true
+    }],
+    "customContextDataKey": {
+    },
+    "id": "A-93f4dfce-2368-4f43-b909-6829e6ae5268"
+  }, {
+    "@type": "type.googleapis.com/ExecuteJS",
+    "expression": "function readFileContent(filePath) {\n    var file \u003d new java.io.File(filePath);\n    if (!file.exists()) {\n        throw \"核心文件不存在: \" + filePath;\n    }\n    var scanner \u003d new java.util.Scanner(file, \"UTF-8\").useDelimiter(\"\\\\Z\");\n    var content \u003d scanner.hasNext() ? scanner.next() : \"\";\n    scanner.close();\n    return String(content);\n}\nvar input \u003d replaceResult;\nvar charnum \u003d input.length;\nvar DebugMode \u003d false;\nvar error;\nif (charnum \u003c 1000) {\n    try{\n        function findRandomDirWithPrefix(basePath, prefix) {\r\n        var File \u003d java.io.File;\r\n        var dir \u003d new File(basePath);\r\n        if (!dir.exists() || !dir.isDirectory()) {\r\n            return null;\r\n        }\r\n        var list \u003d dir.listFiles();\r\n        if (list \u003d\u003d null) {\r\n            return null;\r\n        }\r\n        var result \u003d null;\r\n        for (var i \u003d 0; i \u003c list.length; i++) {\r\n            var file \u003d list[i];\r\n            if (file.isDirectory() \u0026\u0026 file.getName().startsWith(prefix)) {\r\n                result \u003d file.getName();\r\n                break;\r\n            }\r\n        }\r\n        if (result !\u003d\u003d null) {\r\n            return basePath + result;\r\n        } else {\r\n            throw new Error(\"查找ShortX目录失败\")\r\n        }\r\n    }\r\n    var ShortX_Path \u003d findRandomDirWithPrefix(\"/data/system/\", \"shortx\");\n    var isRunAction \u003d false;\r\n    try {\r\n        {factTag}\r\n    } catch (e) {\r\n        isRunAction \u003d true;\r\n    }\n    if(!isRunAction){\n        var tiggerTag\u003dfactTag;\n    }\n    corecode \u003d readFileContent(ShortX_Path+\"/data/Fluid_Cloud_Island/core.js\");\n    eval(corecode);\n    }catch(e){\n    error\u003de.message;\n    }\n}\n\n\"运行中的错误：\" + error;",
+    "context": "CoroutineContext_IO",
+    "customContextDataKey": {
+      "keys": [{
+        "first": "jsRet",
+        "second": "jsRet"
+      }]
+    },
+    "note": "All in One",
+    "id": "A-47bd27f3-1a8e-481d-bac4-b6f816d388b9"
+  }, {
+    "@type": "type.googleapis.com/IfThenElse",
+    "If": [{
+      "@type": "type.googleapis.com/EvaluateContextVar",
+      "op": "DoesNotContain",
+      "varName": "jsRet",
+      "payload": {
+        "value": "运行中的错误：undefined"
+      },
+      "customContextDataKey": {
+      },
+      "id": "C-da958794-dd3a-40a4-b847-bf08a09a39bb"
+    }],
+    "IfActions": [{
+      "@type": "type.googleapis.com/ShowAlertDialog",
+      "positive": "复制日志",
+      "onPositive": [{
+        "@type": "type.googleapis.com/WriteClipboard",
+        "text": "{jsRet}",
+        "customContextDataKey": {
+        },
+        "id": "A-ea62cce2-812e-41a9-a971-c289a1b14901"
+      }],
+      "neutral": "关闭",
+      "title": "错误！",
+      "message": "{jsRet}",
+      "cancelable": true,
+      "style": {
+        "fontScale": 1.0
+      },
+      "customContextDataKey": {
+      },
+      "id": "A-652ed8ee-f68f-4997-bed1-371ea4b4feff"
+    }],
+    "customContextDataKey": {
+    },
+    "id": "A-ca6ddde8-05fb-434a-95ff-f802a254ce10"
+  }],
+  "id": "SHARE-rule-f994671e-5a9e-4a06-9ead-ef5c92fbaeaa",
+  "lastUpdateTime": "1764573928435",
+  "createTime": "1723386652518",
+  "author": {
+    "name": "ShortX"
+  },
+  "title": "流体云组件3.7（超级岛版）",
+  "description": "⬆️打开指令后，点击上方图标→执行动作，进入设置页，GitHub仓库：https://github.com/nightking8342/shortx-Fluid_Cloud_Island/tree/main",
+  "hook": {
+    "actionsOnEnabled": [{
+      "@type": "type.googleapis.com/ExecuteJS",
+      "expression": "importClass(org.json.JSONArray);\r\nimportClass(org.json.JSONObject);\r\nimportClass(org.json.JSONTokener);\r\nimportClass(android.os.Handler);\r\nimportClass(android.os.Looper);\r\nimportPackage(android.view);\r\nimportPackage(android.widget);\r\nimportPackage(android.content);\r\nimportPackage(android.graphics);\r\nimportClass(android.graphics.drawable.GradientDrawable);\r\nimportClass(android.graphics.PixelFormat);\r\nimportClass(android.view.WindowManager);\r\nimportClass(java.lang.Runnable);\r\nimportClass(java.lang.Thread);\r\nimportClass(android.app.ActivityOptions);\r\nimportClass(android.graphics.Rect);\r\nimportClass(android.graphics.Point);\r\nimportClass(android.view.Surface);\r\nimportClass(android.app.ActivityManager);\r\nimportClass(android.content.pm.PackageManager);\r\nimportClass(android.os.UserHandle);\r\nimportClass(android.net.Uri);\r\nimportClass(Packages.tornaco.apps.shortx.core.proto.action.ShellCommand);\r\nimportClass(Packages.tornaco.apps.shortx.core.proto.action.WriteClipboard);\r\nimportClass(android.view.Gravity);\r\nimportClass(android.view.MotionEvent);\r\nimportClass(android.util.DisplayMetrics);\r\nimportClass(android.content.Context); importClass(java.io.FileReader);\r\nimportClass(java.io.BufferedReader);\r\nimportPackage(java.net);\r\nimportPackage(java.io);\r\nimportPackage(java.lang);\r\nimportPackage(java.util.concurrent);\r\nimportClass(Packages.tornaco.apps.shortx.core.proto.action.ShowToast);\r\n\r\n// GitHub仓库信息全局变量\r\nvar GITHUB_OWNER \u003d \"nightking8342\";\r\nvar GITHUB_REPO \u003d \"shortx-Fluid_Cloud_Island\";\r\nvar GITHUB_BRANCH \u003d \"main\";\r\n\r\nfunction showToast(text) {\r\n    action \u003d ShowToast.newBuilder().setMessage(text).build();\r\n    shortx.executeAction(action);\r\n}\r\n\r\nfunction showCountdownDialogBox(title, text, time) {\r\n    function runOnUiThread(fn) {\r\n        new Handler(Looper.getMainLooper()).post(new Runnable({ run: fn }));\r\n    }\r\n\r\n    var uiClosed \u003d false;\r\n\r\n    runOnUiThread(function () {\r\n        var windowManager \u003d context.getSystemService(Context.WINDOW_SERVICE);\r\n        var metrics \u003d new DisplayMetrics();\r\n        windowManager.getDefaultDisplay().getMetrics(metrics);\r\n        var screenWidth \u003d metrics.widthPixels;\r\n        var screenHeight \u003d metrics.heightPixels;\r\n\r\n        var layout \u003d new LinearLayout(context);\r\n        layout.setOrientation(LinearLayout.VERTICAL);\r\n        layout.setBackgroundColor(Color.TRANSPARENT);\r\n        var backgroundDrawable \u003d new android.graphics.drawable.GradientDrawable();\r\n        backgroundDrawable.setColor(Color.WHITE);\r\n        backgroundDrawable.setCornerRadius(50);\r\n        layout.setBackground(backgroundDrawable);\r\n        layout.setPadding(40, 40, 40, 40);\r\n\r\n        var layoutParams \u003d new WindowManager.LayoutParams(\r\n            parseInt(screenWidth * 0.9),\r\n            parseInt(screenHeight * 0.8),\r\n            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,\r\n            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,\r\n            PixelFormat.TRANSLUCENT\r\n        );\r\n        layoutParams.gravity \u003d Gravity.CENTER;\r\n\r\n        var titleView \u003d new TextView(context);\r\n        titleView.setText(title);\r\n        titleView.setTextSize(22);\r\n        titleView.setTextColor(Color.BLACK);\r\n        titleView.setGravity(Gravity.CENTER);\r\n        titleView.setPadding(0, 0, 0, 20);\r\n        layout.addView(titleView);\r\n\r\n        var scrollView \u003d new ScrollView(context);\r\n        var scrollParams \u003d new LinearLayout.LayoutParams(\r\n            LinearLayout.LayoutParams.MATCH_PARENT,\r\n            0,\r\n            1\r\n        );\r\n        scrollView.setLayoutParams(scrollParams);\r\n\r\n        var textView \u003d new TextView(context);\r\n        textView.setText(text);\r\n        textView.setTextSize(18);\r\n        textView.setTextColor(Color.DKGRAY);\r\n        textView.setGravity(Gravity.LEFT);\r\n        scrollView.addView(textView);\r\n        layout.addView(scrollView);\r\n\r\n        var buttonLayout \u003d new LinearLayout(context);\r\n        buttonLayout.setOrientation(LinearLayout.HORIZONTAL);\r\n        buttonLayout.setGravity(Gravity.CENTER);\r\n        buttonLayout.setPadding(0, 30, 0, 0);\r\n        layout.addView(buttonLayout);\r\n\r\n        var closeButton \u003d new Button(context);\r\n        closeButton.setText(\"下一步\");\r\n        closeButton.setTextColor(Color.WHITE);\r\n        closeButton.setEnabled(true);\r\n\r\n        function createRoundedDrawable(color) {\r\n            var drawable \u003d new android.graphics.drawable.GradientDrawable();\r\n            drawable.setColor(color);\r\n            drawable.setCornerRadius(30);\r\n            return drawable;\r\n        }\r\n        closeButton.setBackgroundDrawable(createRoundedDrawable(Color.parseColor(\"#08C661\")));\r\n\r\n        buttonLayout.addView(closeButton);\r\n\r\n        closeButton.setOnClickListener(new View.OnClickListener({\r\n            onClick: function () {\r\n                var writeLocalVar \u003d Packages.tornaco.apps.shortx.core.proto.action.WriteLocalVar.newBuilder()\r\n                    .setVarName(\"next\")\r\n                    .setValueAsString(\"true\")\r\n                    .build();\r\n                shortx.executeAction(writeLocalVar);\r\n                try {\r\n                    windowManager.removeView(layout);\r\n                } catch (e) { }\r\n                uiClosed \u003d true;\r\n            }\r\n        }));\r\n\r\n        try {\r\n            windowManager.addView(layout, layoutParams);\r\n        } catch (e) {\r\n            console.log(\"添加视图失败：\" + e);\r\n            uiClosed \u003d true;\r\n        }\r\n    });\r\n\r\n    while (!uiClosed) {\r\n        Thread.sleep(200);\r\n    }\r\n}\r\n\r\nfunction httpGet(urlStr) {\r\n    function readStreamAsString(inputStream) {\r\n        var reader \u003d new BufferedReader(new InputStreamReader(inputStream, \"UTF-8\"));\r\n        var sb \u003d new StringBuilder();\r\n        var line;\r\n        while ((line \u003d reader.readLine()) !\u003d null) {\r\n            sb.append(line).append(\"\\n\");\r\n        }\r\n        reader.close();\r\n        return sb.toString().trim();\r\n    }\r\n\r\n    try {\r\n        var url \u003d new URL(urlStr);\r\n        var conn \u003d url.openConnection();\r\n        conn.setRequestProperty(\"User-Agent\", \"Rhino-Script/1.0\");\r\n        conn.setConnectTimeout(15000);\r\n        conn.setReadTimeout(30000);\r\n        var code \u003d conn.getResponseCode();\r\n        if (code \u003e\u003d 400) {\r\n            var errStream \u003d conn.getErrorStream();\r\n            var msg \u003d errStream ? readStreamAsString(errStream) : \"HTTP \" + code;\r\n            throw new Error(\"HTTP \" + code + \": \" + msg);\r\n        }\r\n        return readStreamAsString(conn.getInputStream());\r\n    } catch (e) {\r\n        throw new Error(\"请求失败: \" + urlStr + \" -\u003e \" + (e.javaException ? e.javaException.getMessage() : e));\r\n    }\r\n}\r\n\r\nfunction downloadAndExecuteUpdate() {\r\n    try {\r\n        var updateUrl \u003d \"https://raw.githubusercontent.com/\" + GITHUB_OWNER + \"/\" + GITHUB_REPO + \"/\" + GITHUB_BRANCH + \"/update.js\";\r\n        var updateScript \u003d httpGet(updateUrl);\r\n        // 创建一个包装函数，将变量显式赋给全局对象\r\n        var wrappedScript \u003d\r\n            \"(function() {\" +\r\n            updateScript +\r\n            \"}).call(this);\"; // 使用 call(this) 确保在全局作用域执行\r\n        eval(wrappedScript);\r\n        return true;\r\n    } catch (e) {\r\n        console.log(\"下载或执行update.js失败: \" + e);\r\n        showCountdownDialogBox(\r\n            \"无法执行更新脚本\",\r\n            \"错误: \" + e.message,\r\n            3\r\n        );\r\n        return false;\r\n    }\r\n}\r\n// 主执行逻辑\r\nshowCountdownDialogBox(\r\n    \"使用说明\",\r\n    `    0.此指令为自定义UI指令，稳定性与兼容性远不及预制动作制作的指令，如若出现软重启，死机等问题说明你的系统与指令不适配，为确保您的数据安全，请立即停止使用。更新指令与shortx时可能会清理配置，如有自定义的配置，请在更新前做好配置备份，如更新后因配置文件被清理而无法使用，重新开关指令会重新创建默认配置，同时欢迎提交用于各个app的规则（前往简介处GitHub仓库提交pr）\r\n    \r\n    1.小窗打开功能需要没有中转层才可正常使用（如：空浏览,UrlCheck,其他浏览器打开等），部分应用可能强制挣脱小窗需求，ColorOS无法使用始终全屏打开时需在指令参数出将小窗参数的值从5改为100(coloros识别机制为oplus应用低版本coloros下可能不存在)，如你正在使用请在设置中手动配置浏览器\r\n    \r\n    2.选中提取功能可能需要手动重命名并选择一下上下文菜单触发器\r\n    \r\n    3.流体云单击全屏打开，点击按钮使用小窗打开，顶部时上滑关闭下滑进菜单，底部时上滑进菜单，下滑关闭\r\n    \r\n    4.配置文件解释：见配置文件内顶部区域\r\n    \r\n    5.点击指令的图标，点击执行动作进入图形化配置页面\r\n    \r\n    6.安装附加插件实现点击链接交由指令分发\r\n    \r\n    7.配置文件目录：/data/system/shortx*/data/Fluid_Cloud_Island\r\n    8.点击下一步后将从GitHub获取在线规则，请确保网络环境可正常连接到GitHub，重新开启指令可更新云端规则`,\r\n    5\r\n);\r\n\r\n// 尝试下载并执行update.js\r\ndownloadAndExecuteUpdate();",
+      "context": "CoroutineContext_UI",
+      "customContextDataKey": {
+      },
+      "note": "倒计时对话框（使用说明）\n写入核心，初始化配置文件",
+      "id": "A-0feb5e8c-96b5-4f32-a35b-ed94ae93745d"
+    }, {
+      "@type": "type.googleapis.com/IfThenElse",
+      "If": [{
+        "@type": "type.googleapis.com/MatchJS",
+        "expression": "importClass(java.io.File);\nvar dir\u003d\"/data/data/com.nyehueh.fluidcloud\"\nvar file\u003dnew File(dir);\n!file.exists()",
+        "customContextDataKey": {
+        },
+        "id": "C-637b2479-f19d-496e-ba3d-bf76222b48f9"
+      }],
+      "IfActions": [{
+        "@type": "type.googleapis.com/ShowAlertDialog",
+        "positive": "去安装",
+        "onPositive": [{
+          "@type": "type.googleapis.com/StartActivityIntentUri",
+          "intentUri": "https://raw.githubusercontent.com/nyehueh/shortx-Fluid_Cloud/main/Fluid_Cloud(附加插件).apk",
+          "customContextDataKey": {
+          },
+          "id": "A-3a91f79b-de8f-417e-8077-93521b33defd"
+        }],
+        "neutral": "我不需要",
+        "title": "安装附加插件？",
+        "message": "附加插件未安装，安装并设置为默认浏览器后可直接通过点击链接来使用指令进行链接分发",
+        "cancelable": true,
+        "style": {
+          "fontScale": 1.0
+        },
+        "customContextDataKey": {
+        },
+        "id": "A-a1d58fe2-bd1f-4359-9e0f-72a7f3fee99b"
+      }],
+      "customContextDataKey": {
+      },
+      "id": "A-f53f2dbc-6c6e-436d-8e66-7ab8fabc99cb"
+    }],
+    "actionsOnDeleted": [{
+      "@type": "type.googleapis.com/ExecuteJS",
+      "expression": "importPackage(java.io);\nfunction findRandomDirWithPrefix(basePath, prefix) {\n    var File \u003d java.io.File;\n    var dir \u003d new File(basePath);\n    if (!dir.exists() || !dir.isDirectory()) {\n        return null;\n    }\n    var list \u003d dir.listFiles();\n    if (list \u003d\u003d null) {\n        return null;\n    }\n    var result \u003d null;\n    for (var i \u003d 0; i \u003c list.length; i++) {\n        var file \u003d list[i];\n        if (file.isDirectory() \u0026\u0026 file.getName().startsWith(prefix)) {\n            result \u003d file.getName();\n            break; \n        }\n    }\n    if(result!\u003d\u003dnull){\n    return basePath+result;\n    }else{\n    throw new Error(\"查找ShortX目录失败\")\n    }\n}\n\nvar shortxpath\u003dfindRandomDirWithPrefix(\"/data/system/\", \"shortx\");\n\n\nfunction deleteDir(path) {\n    var dir \u003d new File(path);\n    if (!dir.exists()) {\n        return false; \n    }\n    if (dir.isDirectory()) {\n        var files \u003d dir.listFiles();\n        if (files !\u003d null) {\n            for (var i \u003d 0; i \u003c files.length; i++) {\n                var f \u003d files[i];\n                if (f.isDirectory()) {\n                    deleteDir(f.getAbsolutePath()); \n                } else {\n                    if (!f.delete()) {\n                        console.log(\"无法删除文件: \" + f.getAbsolutePath());\n                    }\n                }\n            }\n        }\n    }\n    return dir.delete();\n}\n\n\nfunction checkFileForText(filePath, targetText) {\n    var br \u003d new BufferedReader(new FileReader(filePath));\n    var line;\n    var found \u003d false;\n    while ((line \u003d br.readLine()) !\u003d null) {\n        if (line.includes(targetText)) {\n            found \u003d true;\n            break; \n        }\n    }\n    br.close();\n    if (!found) {\n        deleteDir(shortxpath+\"/data/Fluid_Cloud_Island\");\n    }\n}\n\n\ncheckFileForText(shortxpath+\"/data/u/0/data_store/rules.pb\", \"流体云组件\");",
+      "customContextDataKey": {
+      },
+      "id": "A-8eb97b74-7f9e-4ccb-8536-62f72b2bbec2"
+    }]
+  },
+  "quit": {
+  },
+  "versionCode": "1",
+  "ruleInstanceIdGenerator": {
+    "@type": "type.googleapis.com/RuleInstanceIdGenerator_String",
+    "insId": "{clipboardContent}{selectedText}"
+  }
+}
+###------###
+{"type":"rule"}
