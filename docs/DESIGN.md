@@ -21,9 +21,12 @@
 > - §4.2 —— 小窗打开。⚠️ **本节初稿结论被推翻**（以为 `ActivityOptions` 不可用，实测可用）
 > - §7.1 —— P0 真机验证记录（7 项通过 / 1 项阻塞 / 4 条既有行为）
 > - §7.2 —— 为什么用「引导脚本 + adb push」（远程 API 的 24 KB 上限）
-> - ⚠️ **一处架构变更**：曾经是**两个**工作流（「流体云」+「流体云·点击」），
->   2026-10-08 用户指出「既然用的都是一个脚本，其实不用分成两个工作流」
->   ⇒ **合并成一个工作流挂两个触发器**。见 `tools/install-workflows.py` 文件头
+> - ⚠️ **两处架构变更**：
+>   ① 曾经是**两个**工作流（「流体云」+「流体云·点击」），2026-10-08 用户指出
+>      「既然用的都是一个脚本，其实不用分成两个工作流」⇒ **合并成一个工作流挂两个触发器**；
+>   ② **工作流的产物改为一份 JSON 文件**（`workflow/fluid-cloud.json`），
+>      改工作流 = 改文件 + **导入**回设备。走 API 建工作流那条路**已废弃**（写不全字段）
+>      —— 见 §3.6
 
 ---
 
@@ -401,6 +404,67 @@ diff -r reference/rules src/rules         # 逐字节相同 = 规则库没改过
 |---|---|
 | `onOpen.js` | 它做的事（弹使用说明 / 写 ShortX 局部变量 / 拉 `update.js`）**逐条都依赖原平台**，且第 1 条的触发时机（「指令启用时」）**vFlow 没有对应钩子** |
 | `update.js` | **不是「忘了」，是这条路已废弃** —— 它做的是「拉规则 + **增量合并**」，而本项目定的是「拉产物 + **整份覆盖**」（§3.4）。但**必须留着**：新机制里「哪些东西要一起更新」的判断就是从它那儿来的 |
+
+---
+
+## 3.6 工作流的产物：一份 JSON 文件（**2026-10-08 定案**）
+
+**一句话**：工作流不再通过远程 API 创建，而是**在 vFlow 里导出成 JSON、入库、以后靠导入更新**。
+
+```
+src/bootstrap.js ──(tools/build-workflow.py)──▶ workflow/fluid-cloud.json ──(tools/deploy-workflow.py)──▶ 设备
+                                                        ▲
+                                              触发器 / 颜色 / 描述 等**人维护**的部分
+```
+
+### 为什么放弃 API 那条路
+
+远程 API 的 `POST /api/v1/workflows` 用的是 `SimpleCreateWorkflowRequest`
+（`api/model/WorkflowModels.kt:47-60`），它的字段是：
+
+```kotlin
+name / description / folderId / triggers / steps /
+triggerConfig / triggerConfigs / isEnabled / tags / maxExecutionTime
+```
+
+**没有** `reentryBehavior`、`silentExecution`、`logLevel`、`cardIconRes`、
+`cardThemeColor`、`author`、`homepage`、`vFlowLevel`、`isFavorite` ——
+⇒ 建出来的工作流**永远差一截**，而且**不报错**（表现是「卡片颜色不对」
+「静默执行没生效」「日志等级没设上」）。
+
+而**导出 / 导入**这条路字段是**完整**的：vFlow 2026-10-08 把四条读写路径
+（磁盘读盘 / 文件导入 / 备份恢复 / 导出）收敛到了 `core/workflow/WorkflowJsonCodec.kt`，
+**导出侧改成反射派生**（`gson.toJsonTree(workflow)`）⇒ 模型加字段**自动跟随**，
+不会再出现「导出少一个键」而没人发现的情况。
+
+⇒ 结论：**产物用导出格式，改动用导入回灌。**
+
+### 两个脚本的分工
+
+| 脚本 | 干什么 | 什么时候跑 |
+|---|---|---|
+| `tools/build-workflow.py` | 把 `src/bootstrap.js` 全文与 `inputs` 刷进 JSON（**只碰这两个键**） | 改了 `bootstrap.js` / `inputs` 之后 |
+| `tools/deploy-workflow.py` | 先跑上一个 → `adb push` 到 `/sdcard/vFlow/fluid-cloud/` → 用 `content://` URI 唤起 `ShareReceiverActivity` 导入 | 要更新设备上的工作流时 |
+
+### ⚠️ 三个必须知道的点
+
+1. **导入会弹「冲突」对话框**（`ImportQueueProcessor`），要走「更新」就点**替换**。
+   这是 vFlow 的既有行为，刻意不绕过 —— 绕过意味着直接改 `SharedPreferences`，
+   那会让 App 内存里的状态与磁盘不一致。
+2. **JSON 是 Gson 写的，别用别的工具重排** —— HTML-safe 转义（`< > & = '` → `\uXXXX`，
+   本文件里 `=` 有 **158** 处）与 int/float 之别（`cooldown_ms: 0.0`）都是 JS 的 `JSON`
+   复刻不出来的。重排之后**功能完全正常**，但整份文件变成一行噪声、diff 全废。
+   ⇒ `build-workflow.py` **每次运行都做保形自检**（读原文 → 立刻重序列化 → 逐字节比），
+   不一致就**拒绝写盘**。
+3. **`script` 与 `bootstrap.js` 必须逐字节相同** —— 忘了刷新的表现是
+   「导入到设备上的还是旧脚本」，两边都看不出来。`test/workflow.js` 有一条断言锁住它。
+
+### 与设备上**已有**工作流的关系
+
+导入是**按 id 合并**（不是替换整份列表）。`workflow/fluid-cloud.json` 的 id 是
+`2146d4b7-…`（用户导出的那份），导入到「已有同 id」的设备上就会走冲突分支。
+⚠️ **设备上若还留着旧的「流体云·点击」（另一个 id）**，导入**不会**覆盖它 ——
+要手动删掉（见 §4.6 那条）。
 
 ---
 
@@ -837,17 +901,18 @@ public Class<?> defineClass(String name, byte[] data) {
 **恒为真**（`||` 是「假值才取右边」，不是「缺失才兜底」；用户 2026-10-08 指出）。
 ⚠️ 这是上游的一个真 bug，但**本次不动它** —— 它不阻塞任何东西，改它超出「只修被阻塞处」的范围。
 
-工作流侧由 `tools/install-workflows.py` 建 —— ⭐ **一个工作流、两个触发器**（**已建好**）：
+工作流侧是 **`workflow/fluid-cloud.json`**（**导入即得**）—— ⭐ **一个工作流、两个触发器**：
 
 | 工作流 | 触发器 | `inputs`（键 → 值） |
 |---|---|---|
-| **流体云**（唯一一个） | ① `vflow.trigger.clipboard`（标签 `剪切板`）<br>② `vflow.trigger.broadcast`（action `…fluidcloud.CLICK`、scheme `vflowfc`、标签 `点击`） | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `[[__trigger_label]]` |
+| **流体云**（唯一一个） | ① `vflow.trigger.clipboard`（标签 `剪切板`）<br>② `vflow.trigger.broadcast`（action `…fluidcloud.CLICK`、scheme `vflowfc`、标签 `点击`） | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `{{vars.__trigger_label}}` |
 
 ⚠️ **曾经是两个工作流**（「流体云」+「流体云·点击」）。用户 2026-10-08 指出
 「既然用的都是一个脚本，其实不用分成两个工作流」⇒ **合并成一个**。
 合并的收益：改 `bootstrap.js` 只需刷**一处**，不存在「只更新了其中一个、两边不一致且不报错」。
-（`install-workflows.py` 会**自动删掉**遗留的「流体云·点击」—— 不删的话两个工作流都监听同一个广播，
-一次点击跑两遍，第二遍撞 `block_new` 被忽略，**看起来像随机不触发**。）
+（设备上若还留着旧的「流体云·点击」，**要手动删掉** —— 不删的话两个工作流都监听同一个广播，
+一次点击跑两遍，第二遍撞 `block_new` 被忽略，**看起来像随机不触发**。
+`workflow/fluid-cloud.json` 里没有它，导入**不会**覆盖它。）
 
 ##### ⚠️⚠️ 合并成一个工作流带来的新坑：未命中的触发器输出是 `{{{...}}}`
 
@@ -1160,7 +1225,7 @@ if (!cancelCurrent) {
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | 建 vFlow 工作流：`vflow.trigger.clipboard` + 标签「剪切板」 | ✅ 走 API 创建（`tools/install-workflows.py`） |
+| 1 | 建 vFlow 工作流：`vflow.trigger.clipboard` + `vflow.trigger.broadcast` | ✅ 走**导入**（`workflow/fluid-cloud.json` + `tools/deploy-workflow.py`）。⚠️ 2026-10-08 之前走 API 创建，**已废弃** —— 见 §3.6 |
 | 2 | 移植 `core.js`（**改 3 处专有 API + 1 处路径 + 1 处 `factTag`**） | ✅ 5 类补丁**一次性做完**，结果落盘为 `src/core.js`（改动点就地标 `/* [vflow] */`，共 12 处）。⚠️ 架构调整后**不再有构建期出现次数断言**（见 §3.5），改由 `test/run.js` 的产物 + 源码双路断言兜底 |
 | 3 | 规则库放进 vFlow 可读目录 | ✅ `/sdcard/vFlow/fluid-cloud/` |
 | 4 | `vflow.system.js` 步骤 | ✅ 引导脚本 + `eval`（§7.2） |
@@ -1210,16 +1275,18 @@ if (!cancelCurrent) {
 | 6 | **岛参数两份实现漂移** | 若 P0 脚本内拼 + P1 转模块化，两份 `param_v2` 会不一致 | §4.1：转 B 时**必须删掉脚本那份** |
 | 7 | **Xposed 通道未连接** | `activity_changed` 触发器**静默不触发**（P1 的 QQ/微信源） | 首页有 Xposed 状态卡；`TriggerService` 会显示提示 |
 | 8 | **`extras_json` 被截断** | 广播 extras 超 8 KiB 时 `truncated=true`（`BroadcastTriggerHandler` 的预算） | 检查 `truncated` 输出；附加插件的 URL 通常很短，风险低 |
-| 9 | ⚠️⚠️ **API 的 `parameters` 形状传错** | `POST` 传 `{"type","value"}` 形状 ⇒ **返回 0 成功**，但 DTO 被**原样落盘** ⇒ 脚本读到的 `inputs` 是一个 `{"type":"dictionary",…}` 对象而不是 map，**报错信息完全不指向这里** | 只传**裸值**（`tools/install-workflows.py` 的 `build_payload`）；创建后**必须回读核对**（该脚本的 `verify()`） |
-| 10 | ⚠️⚠️ **API 的 `PUT /workflows/{id}` 根本不写盘** | `handleUpdateWorkflow`（`WorkflowHandler.kt:247-252`）解析完请求体**只回 `successResponse`**，从头到尾没调 `saveWorkflow` ⇒ 返回 `0 success` 而**工作流一个字节都没变** | **不用 PUT**。改脚本走「删掉重建」（`install-workflows.py --force`）。⚠️ 同文件里 `handleCreateWorkflow` 是**真的**写盘的（`:234`），所以 POST 可信 |
+| 9 | ~~**API 的 `parameters` 形状传错**~~ | ~~`POST` 传 `{"type","value"}` 形状 ⇒ 返回 0 成功但 DTO 被原样落盘~~ | ⚠️ **本条已作废**：工作流改走**导入**（§3.6），不再经过 API 的 `parameters` 反序列化。但教训仍在：**任何「返回 0 就算成功」的写入路径都要回读核对** |
+| 10 | ~~**API 的 `PUT /workflows/{id}` 根本不写盘**~~ | ~~`handleUpdateWorkflow`（`WorkflowHandler.kt:247-252`）只回 `successResponse`，没调 `saveWorkflow`~~ | ⚠️ **本条已作废**（同上，不用 PUT 了）。教训仍在：**「成功」的返回值不能当写盘证据** |
+| 11 | ⚠️⚠️ **工作流 JSON 被工具重排** | 用 JS 的 `JSON` / `jq` 重写那份文件 ⇒ Gson 的 HTML-safe 转义与 int/float 之别全丢 ⇒ **功能完全正常，但整份文件变成一行噪声**，diff 从此不可用 | 改它走 `tools/build-workflow.py`（**每次运行都做保形自检，不一致就拒绝写盘**）；`test/workflow.js` 另有一条断言锁形状 |
+| 12 | ⚠️⚠️ **`bootstrap.js` 改了但忘了刷工作流 JSON** | 设备上导入的**还是旧脚本** ⇒ 「改了没生效」，而两边都看不出来 | `test/workflow.js` 断言 `script` 与 `bootstrap.js` **逐字节相同**；改了 `bootstrap.js` 直接跑 `npm run check` 就会红 |
 
 ---
 
 ## 7.1 P0 真机验证记录（2026-10-07，小米 MIX Fold 3 / Android 17）
 
 > 设备：`192.168.1.32:38079`（无线调试）。工作流 id `aa070997-fdba-46bd-9ef7-e1fb7a7ac5cf`。
-> 全流程走的是**远程 API**（`tools/create-workflow.py`，**2026-10-08 已被
-> `tools/install-workflows.py` 取代**），没有手工粘贴 —— 见 §7.2。
+> 全流程走的是**远程 API**（`tools/create-workflow.py`，**2026-10-08 已删除**），没有手工粘贴 —— 见 §7.2。
+> ⚠️ 那次用的是**两个**工作流；此后已合并成一个，且建法改为**导入**（§3.6）。
 
 ### ✅ 已通过
 

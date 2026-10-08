@@ -117,7 +117,7 @@ const UNRESOLVED = (id, out) => '{{{' + id + '.' + out + '}}}';
 
 function run(opts) {
     const o = opts || {};
-    // ⚠️ 两条触发路（见 tools/install-workflows.py 的 INPUTS）。默认：剪贴板命中、点击未命中。
+    // ⚠️ 两条触发路（见 workflow/fluid-cloud.json 的 inputs）。默认：剪贴板命中、点击未命中。
     //    `o.text` 走剪贴板那一路；`o.text` 以 `vflowfc://` 开头时按点击那一路给。
     const isClick = typeof o.text === 'string' && o.text.indexOf('vflowfc://') === 0;
     const ctxVars = {
@@ -200,7 +200,7 @@ test('两条路都未命中时 input 是空串（不是回退串）', () => {
 });
 
 test('⚠️ 适配层不得再读 inputs.text —— 工作流那边已经没有这个键了', () => {
-    // ⚠️ 这条防的是「改了一半」：工作流侧（tools/install-workflows.py 的 INPUTS）
+    // ⚠️ 这条防的是「改了一半」：工作流侧（workflow/fluid-cloud.json 的 inputs）
     //    已把 `text` 拆成 `click_uri` / `clipboard_text` 两路，
     //    若适配层还留着 `inputs.text` 的兜底分支，那条分支**永远取不到值**
     //    —— 不报错、不崩溃，只是白写一段（而它会让人以为「text 这条路还在」）。
@@ -896,7 +896,18 @@ test('package.json 的脚本已跟上架构调整', () => {
     assert(/generate\.js/.test(s.build || ''), 'build 少了拼接那一步');
     // check 必须真的跑测试，否则「绿」没有意义
     assert(/npm test|test\/run\.js/.test(s.check || ''), 'check 没跑测试');
+    // ⚠️ 工作流 JSON 的刷新入口（tools/build-workflow.py）必须有 npm 别名 ——
+    //    它在 README / AGENTS 里被当作「改了 bootstrap.js 之后要跑的那一步」，
+    //    别名没了那些文档就指不到东西。
+    assert(/build-workflow\.py/.test(s['build:workflow'] || ''),
+        'package.json 少了 build:workflow（tools/build-workflow.py）');
 });
+
+// ===========================================================================
+// [10] 工作流产物 —— 单独一个文件（「读产物」与「跑脚本」排查动作不同）
+//
+// ⚠️ 判据必须传进去，不能让它自己去 require('./run.js')（那是循环依赖）。
+require('./workflow')({ test, assert, assertEq });
 
 // ===========================================================================
 console.log('\n' + '='.repeat(60));

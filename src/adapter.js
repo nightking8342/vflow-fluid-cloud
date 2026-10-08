@@ -145,7 +145,8 @@ var input = (function () {
     }
 
     if (typeof inputs !== "undefined" && inputs !== null) {
-        // 两个触发器各一路（见 tools/install-workflows.py 的 INPUTS）。一次执行只命中一个，
+        // 两个触发器各一路（键与值见 workflow/fluid-cloud.json 的 inputs，
+        // 由 tools/build-workflow.py 刷新）。一次执行只命中一个，
         // 另一个必是 `{{{...}}}` ⇒ 这里谁有真值用谁。
         // ⚠️ 点击 URI 排前面：它形态明确（`vflowfc://click?…`），且要被顶层分派认出来。
         if (!unresolved(inputs.click_uri)) return inputs.click_uri;

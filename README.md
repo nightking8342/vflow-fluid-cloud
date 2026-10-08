@@ -18,10 +18,11 @@
 | 目录 | 内容 | 谁维护 |
 |---|---|---|
 | `src/` | **手写的全部东西**（核心逻辑 + 适配层 + 构建脚本 + 规则库） | 我们 |
+| `workflow/` | **工作流产物**（`fluid-cloud.json`）—— 在 vFlow 里**导入**它就建好了工作流 | 我们（`tools/build-workflow.py` 刷新脚本部分） |
 | `reference/` | 上游素材的**完整镜像**（原名，含未移植的 `onOpen.js` / `update.js`），**不进构建**。另含一份 ShortX **规则分享文件**（唯一记录「上游在 ShortX 侧怎么接线」的材料） | 一次性复制，**不要手改** |
 | `dist/` | **构建产物**（脚本 + 规则库），是最终要用的东西 | `npm run build` 生成 |
 | `test/` | 离线测试（Node 模拟 Rhino + Android） | 我们 |
-| `tools/` | 通过 vFlow 远程 API 操作设备（建工作流 / 跑一次取日志） | 我们 |
+| `tools/` | 刷新工作流产物 / 推送到设备 / 跑一次取日志 | 我们 |
 
 ## 构建
 
@@ -32,18 +33,20 @@ npm run build     # 两步全跑：合并规则 → 拼接脚本
 或分步（改了什么跑什么）：
 
 ```bash
-node src/bundle-rules.js   # 1. 合并 src/rules/ → dist/rules.json
-node src/generate.js       # 2. adapter + core → dist/vflow-fluid-cloud.js（完整脚本）
+node src/bundle-rules.js       # 1. 合并 src/rules/ → dist/rules.json
+node src/generate.js           # 2. adapter + core → dist/vflow-fluid-cloud.js（完整脚本）
+python tools/build-workflow.py # 3. bootstrap.js → workflow/fluid-cloud.json（改了脚本才要跑）
 ```
 
 > ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
 > **不是生成器** —— 没有「跑一下生成 dist/bootstrap.js」这回事。
-> 改它之后要把新内容推回工作流（`python tools/install-workflows.py --force`）。
+> 但它的**全文会进工作流 JSON** ⇒ 改它之后必须跑 `tools/build-workflow.py` 刷新
+> `workflow/fluid-cloud.json`，否则**导入到设备上的还是旧脚本**（两边都看不出来）。
 
 ## 测试
 
 ```bash
-npm test          # 等价于 node test/run.js（57 例）
+npm test          # 等价于 node test/run.js（71 例）
 npm run check     # build + 语法检查 + test
 ```
 
@@ -65,17 +68,25 @@ adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
 # 3. 版本号（给将来的更新机制用，见 docs/DESIGN.md §3.4.4）
 adb push version /sdcard/vFlow/fluid-cloud/version
 
-# 4. 工作流（建一次，之后改脚本不用动它）
-python tools/install-workflows.py          # 建缺失的；已存在则跳过
-python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉重建）
+# 4. 工作流 —— ⭐ 走**导入**，不走 API
+python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
+                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
 ```
 
-工作流配置（`tools/install-workflows.py` 会照这个建）——
+> ⚠️ **为什么工作流走导入而不是 API**：远程 API 的 `POST /api/v1/workflows` 用的是
+> `SimpleCreateWorkflowRequest`，它**没有** `reentryBehavior` / `silentExecution` /
+> `logLevel` / `cardIconRes` / `cardThemeColor` 这些字段 ⇒ 建出来的工作流**永远差一截**，
+> 而且**不报错**（表现是「卡片颜色不对」「静默执行没生效」）。
+> 导出/导入那条路字段是**完整**的（vFlow 2026-10-08 把四条读写路径收敛到
+> `WorkflowJsonCodec` 之后，导出是反射派生的）。
+> ⇒ **工作流的产物 = `workflow/fluid-cloud.json`**，改工作流 = 改这份文件 + 导入回设备。
+
+工作流长这样（`workflow/fluid-cloud.json`）——
 ⭐ **一个工作流、两个触发器**（两条触发路跑的是同一份脚本）：
 
 | 工作流 | 触发器 | `inputs`（键 → 值） |
 |---|---|---|
-| **流体云** | ① `剪贴板变更`（`vflow.trigger.clipboard`），标签 `剪切板`<br>② `广播`（`vflow.trigger.broadcast`），action `…fluidcloud.CLICK`、scheme `vflowfc`，标签 `点击` | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `[[__trigger_label]]` |
+| **流体云** | ① `剪贴板变更`（`vflow.trigger.clipboard`），标签 `剪切板`<br>② `广播`（`vflow.trigger.broadcast`），action `…fluidcloud.CLICK`、scheme `vflowfc`，标签 `点击` | `click_uri` → `{{fluid_click_broadcast.data_uri}}`<br>`clipboard_text` → `{{fluid_trigger_clipboard.text_content}}`<br>`trigger_label` → `{{vars.__trigger_label}}` |
 
 它的 `script` 是 `src/bootstrap.js` 全文（**不是**完整脚本）。
 
@@ -85,15 +96,10 @@ python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉
 > 一次执行里必然有一路是这个形态，脚本侧要在 `src/adapter.js` 的 `input` 里认出来当空处理，
 > 否则会拿它去识别链接、**弹一个无意义的岛且不报错**。详见 `docs/DESIGN.md` §4.6。
 
-⚠️ **为什么工作流里放的是 `bootstrap.js` 而不是完整脚本**：vFlow 远程 API 的请求体上限
-是 **24 KB**（实测边界 24065 字节），而完整脚本 113 KB。引导脚本只有约 2 KB，
-它从设备文件读完整脚本并 `eval`。⇒ **改脚本只需 `adb push`，不用重新建工作流。**
-
-> ⚠️⚠️ **API 的 `parameters` 只能传裸值，不能传 `{"type","value"}` 形状** ——
-> 远程 API 的 `POST` 走 `SimpleCreateWorkflowRequest`（`Map<String, Any?>`），
-> 而 `PUT` 走 `UpdateWorkflowRequest`（`Map<String, VObjectDto>`）**且根本没有写盘逻辑**。
-> 传错形状**不报错**，只是把 DTO 原样存进工作流、脚本从此读不到内容。
-> 详见 `tools/install-workflows.py` 文件头。
+⚠️ **为什么工作流里放的是 `bootstrap.js` 而不是完整脚本**：完整脚本 113 KB，
+而工作流 JSON 里塞这么一大段，**每次改脚本都要重新导入一次工作流**
+（改脚本本该只是 `adb push` 的事）。引导脚本只有约 2 KB，
+它从设备文件读完整脚本并 `eval`。⇒ **改脚本只需 `adb push`，不用动工作流。**
 
 ## 改造点（相对上游）
 
@@ -127,7 +133,10 @@ python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉
 ## 当前状态
 
 - ✅ **P0 已真机跑通**（浮窗形态）：复制分享文案 → 识别链接 → 弹浮窗
-- ❌ **超级岛形态被阻塞**：`vflow.system.js` 里不能 `new` 抽象类。
-  真因是 **vFlow 少覆写了 `ContextFactory.createClassLoader`**（不是 ART 的限制）。
-  详见 `docs/DESIGN.md` §4.6
+- ✅ **超级岛形态已打通**（2026-10-08）：脚本里**不能 `new BroadcastReceiver`**
+  这个限制**依然存在**（vFlow 的 `ContextFactory` 没覆写 `createClassLoader`，
+  不是 ART 的限制 —— 详见 `docs/DESIGN.md` §4.6），但**已经绕过**：
+  **按钮只发一条固定 action 的广播**，由 vFlow 的**广播触发器**接住并执行打开。
+  ⇒ 脚本不当接收方，也就不需要 `new` 任何东西。
+  真机验证：点击回传 → 工作流 → `mode=freeform` 小窗打开 ✅
 - ⏳ **脚本更新机制**：方案定案，未实现（§3.4）

@@ -7,6 +7,7 @@
     "build": "node src/bundle-rules.js && node src/generate.js",
     "build:rules": "node src/bundle-rules.js",
     "build:script": "node src/generate.js",
+    "build:workflow": "python tools/build-workflow.py",
     "test": "node test/run.js",
     "check": "npm run build && node --check dist/vflow-fluid-cloud.js && node --check src/bootstrap.js && npm test"
   },

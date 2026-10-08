@@ -77,7 +77,8 @@ def main():
             wf_id = w["id"]
             break
     if not wf_id:
-        print("没找到工作流「%s」—— 先跑 tools/install-workflows.py" % WORKFLOW_NAME, file=sys.stderr)
+        print("没找到工作流「%s」—— 先跑 tools/deploy-workflow.py 把它导入设备" % WORKFLOW_NAME,
+              file=sys.stderr)
         sys.exit(1)
     print("工作流 id =", wf_id)
 

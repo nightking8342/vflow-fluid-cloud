@@ -132,11 +132,13 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 │   ├── bootstrap.js      #   引导脚本**本身**（静态文件，不是生成器）
 │   ├── rules/            #   27 个有链接规则（一文件一条）
 │   └── nolinkrules/      #   2 个无链接规则
+├── workflow/             # 📄 工作流产物
+│   └── fluid-cloud.json  #   ★ 在 vFlow 里**导入**它就建好工作流（字段完整）
 ├── dist/                 # 🔨 构建产物（不入库）
 │   ├── vflow-fluid-cloud.js   # ★ 完整脚本（113 KB）→ push 到设备
 │   ├── rules.json / nolinkrules.json  # ★ 规则库 → push 到设备
 ├── test/                 # 离线测试（Node 模拟 Rhino + Android）
-└── tools/                # 通过 vFlow 远程 API 操作设备
+└── tools/                # 刷新工作流产物 / 推送到设备 / 跑一次取日志
 ```
 
 ---
@@ -144,18 +146,22 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ## 常用命令
 
 ```bash
-npm run build     # 两步全跑：合并规则 → 拼接脚本
-npm test          # 离线测试（57 例）
-npm run check     # build + 语法检查 + test
+npm run build          # 两步全跑：合并规则 → 拼接脚本
+npm run build:workflow # bootstrap.js → workflow/fluid-cloud.json（改了它才要跑）
+npm test               # 离线测试（71 例）
+npm run check          # build + 语法检查 + test
 
 # 单独跑某一步（改了什么跑什么）
-node src/bundle-rules.js   # 改规则库后
-node src/generate.js       # 改了 adapter.js 或 core.js 后
+node src/bundle-rules.js       # 改规则库后
+node src/generate.js           # 改了 adapter.js 或 core.js 后
+python tools/build-workflow.py # 改了 bootstrap.js 后
 ```
 
 > ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
 > **不是生成器**，没有「跑一下生成 dist/bootstrap.js」这回事。
-> 改它之后要把新内容推回**两个**工作流：`python tools/install-workflows.py --force`。
+> 但它的**全文会进 `workflow/fluid-cloud.json`** ⇒ 改它之后必须跑
+> `python tools/build-workflow.py` 刷新，否则**导入到设备上的还是旧脚本**
+> （两边都看不出来 —— 这正是它被写进 `npm test` 的原因）。
 
 ---
 
@@ -174,34 +180,48 @@ adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
 # 3. 版本号（给将来的更新机制用，见 docs/DESIGN.md §3.4.4）
 adb push version /sdcard/vFlow/fluid-cloud/version
 
-# 4. 工作流（用远程 API；建一次，之后改脚本不用动它）—— 一个工作流挂两个触发器
-python tools/install-workflows.py          # 建缺失的；已存在则跳过
-python tools/install-workflows.py --force  # 改了 bootstrap.js 之后（删掉重建）
+# 4. 工作流 —— ⭐ 走**导入**，不走 API（建一次，之后改脚本不用动它）
+python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
+                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
 ```
+
+⚠️ **工作流走导入而不是 API**：API 的 `POST /api/v1/workflows`
+（`SimpleCreateWorkflowRequest`）**没有** `reentryBehavior` / `silentExecution` /
+`logLevel` / `cardIconRes` / `cardThemeColor` 这些字段 ⇒ 建出来的工作流**永远差一截**，
+而且**不报错**。导出/导入那条路字段是完整的（vFlow 2026-10-08 把四条读写路径
+收敛到 `WorkflowJsonCodec`，导出改反射派生）。
+⇒ **产物 = `workflow/fluid-cloud.json`**，旧的 `tools/install-workflows.py` 已删除。
 
 ⚠️ **Windows + Git Bash 下 `adb push` 前要 `export MSYS_NO_PATHCONV=1`**，
 否则 `/sdcard/...` 会被 MSYS 改写成 `D:/develop/Git/sdcard/...`（已实际踩过）。
 
-**为什么分两个文件**：vFlow 远程 API 的**请求体上限是 24 KB**
-（`BaseHandler.readBody` 用 `CharArray(contentLength)` 按字符读；实测边界 24065 字节），
-而完整脚本 113 KB。⇒ 工作流里只放约 2 KB 的**引导脚本**，
-它从设备文件读完整脚本并 `eval`。**好处是改脚本只需 `adb push`，不用改工作流。**
+**为什么分两个文件**：完整脚本 113 KB —— 把它塞进工作流 JSON 意味着
+**每次改脚本都要重新导入一次工作流**（而改脚本本该只是 `adb push` 的事）。
+⇒ 工作流里只放约 2 KB 的**引导脚本**，它从设备文件读完整脚本并 `eval`。
+**好处是改脚本只需 `adb push`，不用动工作流。**
 
 ---
 
 ## 架构：三段式
 
 ```
-vFlow 工作流
-  ├── 触发器 vflow.trigger.clipboard（标签「剪切板」）
+vFlow 工作流（workflow/fluid-cloud.json，导入即得）
+  ├── 触发器 ① vflow.trigger.clipboard（标签「剪切板」）
+  ├── 触发器 ② vflow.trigger.broadcast（标签「点击」，action …CLICK / scheme vflowfc）
   └── 步骤 vflow.system.js
         ├── script = src/bootstrap.js 的内容（约 2 KB）
         │     └─ eval(读 /sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js)
         │           ├─ src/adapter.js（手写：平台桥 + 全局变量 + 自举）
         │           └─ src/core.js   （核心逻辑，就地维护）
-        └── inputs = { text: "{{触发器.text_content}}",
-                       trigger_label: "[[__trigger_label]]" }
+        └── inputs = { click_uri:      "{{fluid_click_broadcast.data_uri}}",
+                       clipboard_text: "{{fluid_trigger_clipboard.text_content}}",
+                       trigger_label:  "{{vars.__trigger_label}}" }
 ```
+
+> ⚠️ 两条触发路跑的是**同一份脚本**，脚本内部靠 `parseClickPayload(input)` 顶层分派。
+> 一次执行里**必然有一路的输出是未命中的**，而 vFlow 对未命中**不给空串**、
+> 给字面量 `{{{stepId.outputId}}}`（三个花括号）⇒ `adapter.js` 的 `input` 必须认出来当空。
+> 详见 §「脚本侧的高频陷阱」第 7 条。
 
 ### 移植时的 5 类改动（**一次性，已落进 `src/core.js`**）
 
@@ -227,14 +247,14 @@ vFlow 工作流
 | 变量 | 来源 |
 |---|---|
 | `input` | `inputs.text`（工作流传入的触发器输出） |
-| `tiggerTag` | `inputs.trigger_label` ← `[[__trigger_label]]`（触发器标签） |
+| `tiggerTag` | `inputs.trigger_label` ← `{{vars.__trigger_label}}`（触发器标签） |
 | `DebugMode` / `isRunAction` / `show_toast` | 固定值（`false` / `false` / `true`） |
 | `FLUID_CLOUD_DIR` | `/sdcard/vFlow/fluid-cloud` |
 | `VFLOW_ADAPTER` | 平台桥（3 个方法 + 2 个文件读写工具） |
 
 ---
 
-## ⚠️ 头号已知问题：脚本里**不能 `new` 抽象类**
+## ⚠️ 头号已知问题：脚本里**不能 `new` 抽象类**（**已绕过**）
 
 **现象**：走超级岛路径时抛
 
@@ -249,13 +269,18 @@ vFlow 工作流
 ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` → dex →
 `InMemoryDexClassLoader`）。**⇒ 这是 vFlow 侧要补的一层，不是 ART 的限制。**
 
-**当前绕过**：配置里 `use_islandNotification = false`，走浮窗路径（**已真机验证可用**）。
+### ✅ 现状（2026-10-08）：**限制仍在，但已绕过**
 
-**已定案的恢复路径（2026-10-07，未实现）**：**脚本只发广播、不当接收方** ——
-删掉 `new BroadcastReceiver` 那一整段，按钮的 `PendingIntent` 发一个**固定 action** 的广播
-（extras 带「打开哪个链接 / 全屏还是小窗」），由 **vFlow 的广播触发器**（`vflow.trigger.broadcast`）
-接住并执行打开。**不用改 vFlow，也顺带解决了「阻塞 3 秒」**。
-⚠️ 两个必须同时成立的契约（action 写死 + extras 能定位到哪一次）见 `docs/DESIGN.md` §4.6 出路 ①。
+**脚本只发广播、不当接收方** —— 删掉 `new BroadcastReceiver` 那一整段，
+按钮的 `PendingIntent` 发一个**固定 action** 的广播（URI 里带「打开哪个链接 / 全屏还是小窗」），
+由 **vFlow 的广播触发器**（`vflow.trigger.broadcast`）接住并执行打开。
+**不用改 vFlow，也顺带解决了「阻塞 3 秒」。**
+⚠️ 三条必须同时成立的契约（action 写死 / scheme 必须声明 / URI 能定位到哪一次）
+见 `docs/DESIGN.md` §4.6 出路 ①。
+
+⚠️⚠️ **只改了「按钮」那一条 `PendingIntent`** —— 通知**主体**那条仍是上游原样的
+`PendingIntent.getActivity`（系统直接拉起 Activity，**脚本不参与、不阻塞**）。
+早先版本把两条都改成广播，那是**过度改动**（用户 2026-10-08 纠正）。
 
 **实测矩阵**（判据是 `getClass().getName()`，不是「有没有返回值」）：
 
@@ -276,7 +301,7 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 | 设备 | 小米 MIX Fold 3 / Android 17（**澎湃 OS**，超级岛协议相关） |
 | 连接 | 无线调试 `192.168.1.32:38079`（`adb connect <addr>`） |
 | vFlow 远程 API | `http://192.168.1.32:8080`（需在设备上开启「远程 Web 服务」） |
-| 工作流 id | `aa070997-fdba-46bd-9ef7-e1fb7a7ac5cf`（名字「流体云」） |
+| 工作流 id | `2146d4b7-b6f5-4468-be66-432aa2acc5f2`（名字「流体云」）。⚠️ **以 `workflow/fluid-cloud.json` 里的 `id` 为准** —— 导入会保留它。`tools/run.py` 按**名字**找，不依赖这个值 |
 | 配置目录 | `/sdcard/vFlow/fluid-cloud/` |
 | 脚本日志 | `adb logcat -d \| grep JsScript`（`console.log` 落到这里，**不在**工作流日志里） |
 
@@ -294,6 +319,8 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 | 4 | **工作流执行中再触发会被忽略** | `WorkflowExecutor` 的 `BLOCK_NEW` 重入策略。调试时先 `disable` 再 `enable`，或重启 App |
 | 5 | **API 的 `input_variables` 是死参数** | `ExecutionManager.executeWorkflowInternal` 签名里有它，**函数体内零引用**。⇒ 无法通过 API 注入变量，只能「写剪贴板 + 靠触发器」 |
 | 6 | **`adb logcat` 读不到脚本的早期日志** | 脚本的 `console.log` 走 `JsScript` tag。启动洪流会冲掉开机后的日志 —— 抓不到就重启 App 后立刻抓 |
+| 7 | ⚠️⚠️ **未命中的触发器输出是 `{{{...}}}`，不是空串** | 一个工作流挂两个触发器时**一次执行必然有一路未命中**，而 vFlow 对它回退成字面量 `{{{stepId.outputId}}}`（**三个花括号**，`VariableResolver.kt:133`）。直接当值用 ⇒ 拿它去识别链接 ⇒ **弹一个无意义的岛，且不报错**。`adapter.js` 的 `input` 里显式认出来当空处理 |
+| 8 | ⚠️ **导出/导入的 JSON 是 Gson 写的** | HTML-safe 转义（`< > & = '` → `\uXXXX`）、**区分 int/float**（`cooldown_ms: 0.0`）。用 JS 的 `JSON` 或 `jq` 重排会**整份文件变成一行噪声** —— 功能正常但 diff 全废。⇒ 改它走 `tools/build-workflow.py`（它做了保形自检） |
 
 ---
 
@@ -303,7 +330,8 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 |---|---|
 | `src/adapter.js` / `src/core.js` | `npm run check` + **重新 `adb push` 完整脚本** |
 | `src/rules/` / `src/nolinkrules/` | `npm run check` + 重新 push **两个 JSON** |
-| `src/bootstrap.js` | `npm run check` + **推回工作流**（`tools/install-workflows.py --force`） |
+| `src/bootstrap.js` | `npm run check` + `npm run build:workflow` + **导入工作流**（`tools/deploy-workflow.py`） |
+| `workflow/fluid-cloud.json`（改触发器 / 颜色 / 描述） | **导入工作流**（`tools/deploy-workflow.py --no-build`） |
 | `version` | 改了产物就一并改它（§3.4.4） |
 | ⚠️ `reference/` | **一律不改** —— 那是来历记录，改了就失去对照价值 |
 
@@ -324,9 +352,13 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 ## 未决项（优先看 `docs/DESIGN.md` §7）
 
-1. ⭐ **补 vFlow 的 `ContextFactory.createClassLoader`**（恢复超级岛形态的前提）
-2. **脚本更新机制**（拉产物 / 不走代理 / 覆盖 + 版本号对比）——
+1. **脚本更新机制**（拉产物 / 不走代理 / 覆盖 + 版本号对比）——
    **方案已定案，未实现**，见 `docs/DESIGN.md` §3.4
-3. QQ / 微信触发源（`vflow.trigger.activity_changed` + `class_filter`）
-4. 小窗打开（`service call activity_task 138`，小米私有事务码）
-5. 附加插件（`com.nyehueh.fluidcloud`）是否继续用
+2. QQ / 微信触发源（`vflow.trigger.activity_changed` + `class_filter`）
+3. 附加插件（`com.nyehueh.fluidcloud`）是否继续用
+4. ~~补 vFlow 的 `ContextFactory.createClassLoader`~~ —— **不再是阻塞项**：
+   超级岛形态已用「按钮发广播 + 广播触发器接住」绕过（见上文「头号已知问题」）。
+   补那一层仍能顺带解决「具体类子类化不可靠」，但**没有需求驱动**
+5. ~~小窗打开~~ —— **已解决**：`ActivityOptions.setLaunchWindowingMode` +
+   `setLaunchBounds` 在 vFlow 的 JS 里**可用**（真机实测，见 `docs/DESIGN.md` §4.2），
+   不需要 `service call` 那条私有事务码
