@@ -83,7 +83,9 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 
 ## ⚠️ vFlow 本地源码在哪（开发时必读）
 
-**`D:/develop/myProjects/vflow`**（分支 `dev`）。
+**vFlow 主仓库**（[`nightking8342/vFlow`](https://github.com/nightking8342/vFlow)，分支 `dev`），
+开发时是本地克隆。**本文件不写它的本地绝对路径** —— 每台机器不一样，
+按自己的克隆位置找即可（下文引用 vFlow 侧文件时都写**仓库内相对路径**）。
 
 本项目的脚本要调 vFlow 的模块、要遵守 vFlow 的脚本注入约定，
 **遇到「vflow 的某个模块参数叫什么」「脚本里能拿到什么变量」这类问题，
@@ -168,7 +170,7 @@ python tools/build-workflow.py # 改了 bootstrap.js 后
 ## 部署到设备
 
 ```bash
-export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/develop/Git/sdcard
+export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/Git/sdcard
 
 # 1. 规则库（首次；脚本首次运行会自检并在缺失时抛错）
 adb push dist/rules.json       /sdcard/vFlow/fluid-cloud/
@@ -193,7 +195,7 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
 ⇒ **产物 = `workflow/fluid-cloud.json`**，旧的 `tools/install-workflows.py` 已删除。
 
 ⚠️ **Windows + Git Bash 下 `adb push` 前要 `export MSYS_NO_PATHCONV=1`**，
-否则 `/sdcard/...` 会被 MSYS 改写成 `D:/develop/Git/sdcard/...`（已实际踩过）。
+否则 `/sdcard/...` 会被 MSYS 改写成 `D:/Git/sdcard/...`（已实际踩过）。
 
 **为什么分两个文件**：完整脚本 113 KB —— 把它塞进工作流 JSON 意味着
 **每次改脚本都要重新导入一次工作流**（而改脚本本该只是 `adb push` 的事）。
@@ -296,12 +298,14 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 ## 真机验证环境
 
+> ⚠️ **本文件进公开仓库，所以不写具体设备地址。** 按下面的方式取当前值。
+
 | 项 | 值 |
 |---|---|
 | 设备 | 小米 MIX Fold 3 / Android 17（**澎湃 OS**，超级岛协议相关） |
-| 连接 | 无线调试 `192.168.1.32:38079`（`adb connect <addr>`） |
-| vFlow 远程 API | `http://192.168.1.32:8080`（需在设备上开启「远程 Web 服务」） |
-| 工作流 id | `2146d4b7-b6f5-4468-be66-432aa2acc5f2`（名字「流体云」）。⚠️ **以 `workflow/fluid-cloud.json` 里的 `id` 为准** —— 导入会保留它。`tools/run.py` 按**名字**找，不依赖这个值 |
+| 连接 | 无线调试：`adb connect <设备地址>`（地址在设备的「无线调试」页里；默认端口 **38079**） |
+| vFlow 远程 API | `http://<设备地址>:8080`（需在设备上开启「远程 Web 服务」；API 端口**默认 8080**） |
+| 工作流 id | ⚠️ **以 `workflow/fluid-cloud.json` 里的 `id` 为准** —— 导入会保留它。`tools/run.py` 按**名字**找，不依赖这个值 |
 | 配置目录 | `/sdcard/vFlow/fluid-cloud/` |
 | 脚本日志 | `adb logcat -d \| grep JsScript`（`console.log` 落到这里，**不在**工作流日志里） |
 

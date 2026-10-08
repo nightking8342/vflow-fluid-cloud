@@ -19,6 +19,7 @@
 import argparse
 import io
 import json
+import os
 import pathlib
 import sys
 import time
@@ -31,6 +32,10 @@ if hasattr(sys.stdout, "buffer"):
 
 DEVICE_ID = "claude-code-fluid-cloud"
 WORKFLOW_NAME = "流体云"
+
+# ⚠️ **不写默认的设备地址** —— 本仓库是公开的，设备地址属于个人环境信息。
+#    取值顺序：`--host` > 环境变量 `VFLOW_API_HOST` > 报错提示。
+DEFAULT_HOST = os.environ.get("VFLOW_API_HOST")
 
 
 def http(method, url, body=None, token=None, timeout=90):
@@ -54,11 +59,18 @@ def http(method, url, body=None, token=None, timeout=90):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.1.32:8080")
+    ap.add_argument("--host", default=DEFAULT_HOST,
+                    help="vFlow 远程 API 地址（host:port）。也可用环境变量 VFLOW_API_HOST")
     ap.add_argument("--text", default=None, help="写进剪贴板的文本（模拟「复制分享文案」）")
     ap.add_argument("--tag", default=None, help="触发器标签覆盖（默认不动，用工作流里配的）")
     ap.add_argument("--wait", type=float, default=20.0, help="等执行结束的秒数")
     args = ap.parse_args()
+
+    if not args.host:
+        print("没给 vFlow 远程 API 地址。用 --host <设备地址>:8080，"
+              "或设环境变量 VFLOW_API_HOST。\n"
+              "（地址在设备的「远程 Web 服务」页里；本仓库不写死它。）", file=sys.stderr)
+        sys.exit(2)
 
     base = "http://" + args.host
 

@@ -56,7 +56,7 @@ npm run check     # build + 语法检查 + test
 ## 部署到设备
 
 ```bash
-export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/develop/Git/sdcard
+export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/Git/sdcard
 
 # 1. 规则库（首次；脚本首次运行会自检并在缺失时报错）
 adb push dist/rules.json       /sdcard/vFlow/fluid-cloud/

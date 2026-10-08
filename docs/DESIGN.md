@@ -4,8 +4,9 @@
 > 这条链路做成 vFlow 工作流。
 > **状态**：**P0 已跑通，超级岛形态也已打通**（2026-10-08，走 §4.6 出路 ①：脚本只发广播、
 > 由工作流的广播触发器接；点按钮 → 小窗打开，真机验证通过）。**不再有阻塞项。**
-> **代码位置**：`D:/develop/myProjects/vflow-fluid-cloud`（**独立仓库**，分支 `main`；不再是 vFlow 的 worktree）。
-> **脚本来源**：`D:/develop/myProjects/shortx-Fluid_Cloud_Island`（本地克隆，分支 `vflow`，**未做任何改动**；
+> **代码位置**：本仓库（**独立仓库**，分支 `main`；不再是 vFlow 的 worktree）。
+> **脚本来源**：[`nightking8342/shortx-Fluid_Cloud_Island`](https://github.com/nightking8342/shortx-Fluid_Cloud_Island)
+> 的**完整镜像**已收进 `reference/`（逐字节一致，**未做任何改动**；
 > `version` = `3.2.3`，`core.js` 2810 行 / `onOpen.js` 223 行 / `update.js` 647 行）。
 >
 > ⚠️ 本文**所有关于 vFlow 现状的结论都已逐条核实过源码**（附 `file:line`）。
@@ -1284,9 +1285,11 @@ if (!cancelCurrent) {
 
 ## 7.1 P0 真机验证记录（2026-10-07，小米 MIX Fold 3 / Android 17）
 
-> 设备：`192.168.1.32:38079`（无线调试）。工作流 id `aa070997-fdba-46bd-9ef7-e1fb7a7ac5cf`。
+> 设备：小米 MIX Fold 3（**无线调试**，`adb connect <设备地址>`）。工作流 id `aa070997-…`。
 > 全流程走的是**远程 API**（`tools/create-workflow.py`，**2026-10-08 已删除**），没有手工粘贴 —— 见 §7.2。
 > ⚠️ 那次用的是**两个**工作流；此后已合并成一个，且建法改为**导入**（§3.6）。
+> ⚠️ 具体设备地址与工作流 id **不写进本文件**（它会进公开仓库）——
+> 跑的时候按当前设备填，见 `AGENTS.md` 的「真机验证环境」。
 
 ### ✅ 已通过
 

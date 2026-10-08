@@ -105,7 +105,7 @@ def main():
     adb(["shell", "mkdir", "-p", DEVICE_DIR], args.serial, check=False)
 
     # ⚠️ 不 `export MSYS_NO_PATHCONV` 的话，Git Bash 会把 `/sdcard/...`
-    #    改写成 `D:/develop/Git/sdcard/...`（本项目已实际踩过）。
+    #    改写成 `D:/Git/sdcard/...`（本项目已实际踩过）。
     #    这里走 subprocess 而不是 shell，MSYS 不介入路径 —— 但仍留个心眼：
     #    `adb push` 的第二个参数是**设备路径**，别加盘符前缀。
     r = adb(["push", str(WORKFLOW), DEVICE_PATH], args.serial, check=False)
