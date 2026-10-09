@@ -579,9 +579,14 @@ function vflowBootstrapLoad() {
     }
 
     var code = vflowUpdateReadLocal(VFLOW_SCRIPT_PATH);
-    if (vflowUpdateValidateMainScript(code) !== null) {
-        vflowUpdateFail("脚本文件异常（可能被截断）：" + VFLOW_SCRIPT_PATH);
-        throw new Error("流体云：脚本文件异常 " + VFLOW_SCRIPT_PATH + " —— 可能被截断");
+    var bad = vflowUpdateValidateMainScript(code);
+    if (bad !== null) {
+        // ⚠️ 错误文案里**必须带实际长度**：否则「读不到 / 读一半 / 文件真坏」
+        //    三种情况在日志里长得一模一样（真机上踩过，见 AGENTS.md 陷阱 9）。
+        var got = (code === null) ? "读不到" : (code.length + " 字符");
+        var msg = "脚本文件异常（" + bad + "；实际 " + got + "）：" + VFLOW_SCRIPT_PATH;
+        vflowUpdateFail(msg);
+        throw new Error("流体云：" + msg);
     }
     return code;
 }
