@@ -340,6 +340,8 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 | 6 | **`adb logcat` 读不到脚本的早期日志** | 脚本的 `console.log` 走 `JsScript` tag。启动洪流会冲掉开机后的日志 —— 抓不到就重启 App 后立刻抓 |
 | 7 | ⚠️⚠️ **未命中的触发器输出是 `{{{...}}}`，不是空串** | 一个工作流挂两个触发器时**一次执行必然有一路未命中**，而 vFlow 对它回退成字面量 `{{{stepId.outputId}}}`（**三个花括号**，`VariableResolver.kt:133`）。直接当值用 ⇒ 拿它去识别链接 ⇒ **弹一个无意义的岛，且不报错**。`adapter.js` 的 `input` 里显式认出来当空处理 |
 | 8 | ⚠️ **导出/导入的 JSON 是 Gson 写的** | HTML-safe 转义（`< > & = '` → `\uXXXX`）、**区分 int/float**（`cooldown_ms: 0.0`）。用 JS 的 `JSON` 或 `jq` 重排会**整份文件变成一行噪声** —— 功能正常但 diff 全废。⇒ 改它走 `tools/build-workflow.py`（它做了保形自检） |
+| 9 | ⚠️⚠️ **`java.util.Scanner` + `useDelimiter("\\Z")` 读大文件会截断** | **真机实测（2026-10-09）**：读 148 KB 的主脚本只读回一小段 ⇒ 表现是「刚下载并写盘成功，回读却判『脚本被截断』」，看起来像写盘坏了。`Scanner` 内部缓冲区有上限。⇒ **一律用 `BufferedReader` + `StringBuilder` 逐行读**（`core.js` 的 `readJsonFile` 就是这套，真机上好的）。有断言锁着（`test/run.js` 的 [14]） |
+| 10 | ⚠️ **长距离 HTTP 传输可能把响应体截断** | 日志里看 `[JS->HTTP 请求] 收到响应` 只说明拿到了东西。bootstrap 会打「远端主脚本 N 字符（本地 M 字符）」与「回读主脚本 N 字符」两条日志 —— **三处长度对不上**就能定位是传输截断还是写盘问题 |
 
 ---
 

@@ -11,8 +11,8 @@
 // ⚠️ 代价：**改更新逻辑要重新导入工作流**（不是 `adb push` 一个文件），
 //    详见 docs/UPDATE.md §7。
 //
-// ⚠️ **本文件顶层直接跑**（末尾的闸放行 `vflowBootstrapMain()`），
-//    不能包 IIFE —— 理由与下面 `eval(vflowCode)` 那段注释相同。
+// ⚠️ **本文件顶层直接跑**（末尾那道闸：自足检查 → 读主脚本 → **在顶层** eval 它），
+//    不能包 IIFE —— 理由与文件末尾 `eval(VFLOW_MAIN_CODE)` 那段注释相同。
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -61,15 +61,33 @@ function vflowUpdateTrim(s) {
     return String(s).replace(/^\s+/, "").replace(/\s+$/, "");
 }
 
-/** 读设备上的文本文件；不存在 / 读不了返回 null。 */
+/**
+ * 读设备上的文本文件；不存在 / 读不了返回 null。
+ *
+ * ⚠️⚠️ **用 `BufferedReader` + `StringBuilder`，不要用 `java.util.Scanner`。**
+ *    真机实测（2026-10-09）：`Scanner` + `useDelimiter("\\Z")` 读 148 KB 的主脚本
+ *    **读不全**（`Scanner` 内部缓冲区有上限，超长 token 会被截断）——
+ *    表现是「刚下载并写盘成功，回读却只有一小段 ⇒ 判成『脚本被截断』」。
+ *    `core.js` 的 `readJsonFile` 用的就是 `BufferedReader`，那套**在真机上是好的**。
+ */
 function vflowUpdateReadLocal(path) {
     try {
         var file = new java.io.File(path);
         if (!file.exists()) return null;
-        var scanner = new java.util.Scanner(file, "UTF-8").useDelimiter("\\Z");
-        var content = scanner.hasNext() ? scanner.next() : "";
-        scanner.close();
-        return String(content);
+        var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+            new java.io.FileInputStream(file), "UTF-8"));
+        var sb = new java.lang.StringBuilder();
+        var chunk;
+        var first = true;
+        while ((chunk = reader.readLine()) !== null) {
+            // ⚠️ 用 flag 而不是 `sb.length()` —— 少一个引擎/桩上的方法假设
+            //    （离线 harness 的 StringBuilder 桩就没实现 length()）。
+            if (!first) sb.append("\n");
+            sb.append(chunk);
+            first = false;
+        }
+        reader.close();
+        return String(sb.toString());
     } catch (e) {
         return null;
     }
@@ -473,6 +491,12 @@ function vflowBootstrapEnsureFiles() {
 
     var rs = vflowUpdateHttpGet(VFLOW_UPDATE_URLS.script);
     if (!rs.ok) return "拉取主脚本失败（" + rs.error + "）";
+    // ⚠️ 打长度：148 KB 的响应体经 JS 桥**可能被截断**（UPDATE.md §10 第 3 项）。
+    //    不打这一条，截断的表现就是「下载成功但校验不过」，看不出是哪种。
+    try {
+        console.log("[fluid-cloud] 远端主脚本 " + rs.body.length + " 字符（本地产物 "
+            + (vflowUpdateReadLocal(VFLOW_SCRIPT_PATH) || "").length + " 字符）");
+    } catch (e) { /* 忽略 */ }
     var sErr = vflowUpdateValidateMainScript(rs.body);
     if (sErr !== null) return "远端主脚本校验不过：" + sErr;
 
@@ -494,6 +518,16 @@ function vflowBootstrapEnsureFiles() {
     // 四份都拿到了 ⇒ 逐份原子写（每份失败都不动原文件；此时一律中止并报错）
     var e1 = vflowUpdateAtomicWrite(VFLOW_CLOUD_DIR + "/vflow-fluid-cloud.js", rs.body, vflowUpdateValidateMainScript);
     if (e1 !== null) return "主脚本写入失败：" + e1;
+    // ⚠️ 写盘后**回读一遍**：`renameTo` 在 /sdcard（sdcardfs）上的行为未实测
+    //    （UPDATE.md §10 第 1 项），而这里正是它的第一现场 —— 回读长度不符
+    //    要**立刻**报出来，别等到「脚本被截断」那句。
+    try {
+        var backLen = (vflowUpdateReadLocal(VFLOW_SCRIPT_PATH) || "").length;
+        console.log("[fluid-cloud] 回读主脚本 " + backLen + " 字符");
+        if (backLen !== rs.body.length) {
+            return "写入后回读长度不符（" + backLen + " ≠ " + rs.body.length + "）—— 可能是 /sdcard 上的写入/改名问题";
+        }
+    } catch (e) { /* 忽略 */ }
 
     // ⚠️ 规则库这里**整份覆盖**（不按 name 合并）：本分支的前提是「本地不可用」
     //    （不存在或为空）⇒ 没有「本地独有规则」要保留。手动「检查更新」那条路

@@ -437,9 +437,29 @@ function installJava(sandbox) {
                     this._text = fs.existsSync(this.path) ? fs.readFileSync(this.path, 'utf8') : null;
                 }
             },
+            /**
+             * ⚠️ 必须真实现 —— bootstrap 的 `vflowUpdateReadLocal` 用
+             * `new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"))`
+             * 读主脚本（**不用 `Scanner`**：真机上 `Scanner` + `useDelimiter("\\Z")`
+             * 读 148 KB 会截断，见 src/bootstrap.js 里那段注释）。
+             */
+            FileInputStream: class {
+                constructor(f) {
+                    this.path = typeof f === 'string' ? mapPath(f) : f.path;
+                    if (!fs.existsSync(this.path)) {
+                        throw new Error(`FileNotFoundException: ${this.path}`);
+                    }
+                }
+            },
+            InputStreamReader: class {
+                constructor(fis, _charset) {
+                    this.path = fis.path;
+                    this._text = fs.readFileSync(this.path, 'utf8');
+                }
+            },
             BufferedReader: class {
                 constructor(reader) {
-                    if (reader._text === null) {
+                    if (reader._text === null || reader._text === undefined) {
                         // 与真 Java 一致：文件不存在时构造 FileReader 就抛
                         throw new Error(`FileNotFoundException: ${reader.path}`);
                     }

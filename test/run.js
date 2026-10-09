@@ -984,7 +984,7 @@ test('version 文件存在且与 package.json 一致', () => {
 test('bootstrap.js 是静态文件（不是生成器）', () => {
     const bs = readSrc('bootstrap.js');
     // 静态文件的特征：它就是**要贴进工作流的那段代码**本身
-    assert(bs.includes('eval(vflowCode)'), 'bootstrap.js 不像引导脚本本体');
+    assert(bs.includes('eval(VFLOW_MAIN_CODE)'), 'bootstrap.js 不像引导脚本本体');
     assert(bs.includes('/sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js'), 'bootstrap.js 里的脚本路径不对');
     // 生成器的特征：会去写 dist/。有它就说明这是旧版生成器，不是静态文件。
     assert(!bs.includes('writeFileSync'), 'bootstrap.js 还在写文件 —— 它是生成器，不是静态文件');
@@ -1536,6 +1536,25 @@ function runBootstrap(text, opts) {
     }
     return { sandbox: boot.sandbox, calls: boot.calls, context: boot.context, threw };
 }
+
+test('⭐ 读回 148 KB 不截断（真机踩过：Scanner + useDelimiter("\\Z") 会截断）', () => {
+    // ⚠️ 真机实测（2026-10-09）：用 `java.util.Scanner` + `useDelimiter("\\Z")` 读主脚本
+    //    **读不全** ⇒ 刚下载并写盘成功、回读却只有一小段 ⇒ 判成「脚本被截断」。
+    //    这里断言读回的长度与写进去的**完全一致**（harness 的 stub 逐行拼，等价于
+    //    `BufferedReader` 的行为；换回 Scanner 就会红）。
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const big = '// 头\nvar FLUID_CLOUD_ACTION_CLICK = "x";\n' + ('// ' + 'x'.repeat(100) + '\n').repeat(1500);
+    const p = path.join(CLOUD_DIR, 'big-read.txt');
+    fs.writeFileSync(p, big, 'utf8');
+    const back = sandbox.vflowUpdateReadLocal(p);
+    assertEq(back.length, big.length, `读回被截断：${back.length} ≠ ${big.length}`);
+    assert(back.indexOf('var FLUID_CLOUD_ACTION_CLICK') !== -1, '读回的内容里没有特征串');
+    // 反向锁：源码里不该再用 Scanner 读文件
+    const u = readSrc('bootstrap.js');
+    assert(!/new java\.util\.Scanner/.test(u),
+        'bootstrap.js 又用 Scanner 读文件了 —— 真机上读 148 KB 会截断');
+});
 
 test('⭐ 三份都缺 ⇒ 拉全套四份并写盘，且**主脚本被 eval**（导入即自足）', () => {
     mockRemote({
