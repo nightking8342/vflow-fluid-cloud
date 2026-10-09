@@ -4,9 +4,11 @@
  *
  * 输入： src/adapter.js   （手写：平台桥 + 全局变量 + 首次自举）
  *       src/core.js      （手写：核心逻辑，从上游移植后**就地维护**）
- *       src/update.js    （手写：更新器，**独立输出**，不进主脚本）
  * 输出： dist/vflow-fluid-cloud.js  （adapter + core 两段）
- *       dist/update.js              （**独立文件** —— core.js 在「检查更新」时读它并 eval）
+ *
+ * ⚠️ **更新逻辑不在产物里** —— 它在 `src/bootstrap.js`（工作流里那段 script），
+ *    见 docs/UPDATE.md §7：更新器搬进工作流，导入即自足。
+ *    （上一版这里还有一个 `dist/update.js` 独立输出，已随该调整删除。）
  *
  * ## 为什么还要拼（不直接维护单文件）
  *
@@ -35,10 +37,6 @@ const ROOT = path.resolve(__dirname, '..');
 const ADAPTER = path.join(ROOT, 'src', 'adapter.js');
 const CORE = path.join(ROOT, 'src', 'core.js');
 const OUT = path.join(ROOT, 'dist', 'vflow-fluid-cloud.js');
-
-// ⚠️ **独立输出** —— 不拼进 OUT（见文件头）。core.js 在「检查更新」时读它 + eval。
-const UPDATE_SRC = path.join(ROOT, 'src', 'update.js');
-const OUT_UPDATE = path.join(ROOT, 'dist', 'update.js');
 
 function read(file) {
     if (!fs.existsSync(file)) {
@@ -81,30 +79,10 @@ function main() {
     fs.mkdirSync(path.dirname(OUT), { recursive: true });
     fs.writeFileSync(OUT, out, 'utf8');
 
-    // ⚠️ 第二个输出：更新器（**独立**，不拼进 out）。banner 与主产物同形。
-    const update = read(UPDATE_SRC);
-    const updateBanner = [
-        '// ============================================================================',
-        '// vFlow 流体云 · 更新器（构建产物，独立文件）',
-        '//',
-        '// ⚠️ 不要手改本文件 —— 改 src/update.js 后重跑：',
-        '//      node src/generate.js',
-        '//',
-        '// ⚠️ 它**不并进主脚本**（dist/vflow-fluid-cloud.js 只有 adapter + core）。',
-        '//    由 core.js 的「检查更新」菜单项读它并 eval。',
-        '// ⚠️ **更新流程不会更新它自己** —— 改了它要手动推：',
-        '//      adb push dist/update.js /sdcard/vFlow/fluid-cloud/',
-        '// ============================================================================',
-        '',
-        ''
-    ].join('\n');
-    fs.writeFileSync(OUT_UPDATE, updateBanner + update, 'utf8');
-
     const al = adapter.split('\n').length;
     const cl = core.split('\n').length;
     console.log(`[ok] ${path.relative(ROOT, OUT)}`);
     console.log(`     adapter ${al} 行 + core ${cl} 行 = ${out.split('\n').length} 行 / ${out.length} 字符`);
-    console.log(`[ok] ${path.relative(ROOT, OUT_UPDATE)}（独立更新器，${update.split('\n').length} 行）`);
 }
 
 main();

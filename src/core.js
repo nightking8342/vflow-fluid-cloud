@@ -2741,25 +2741,22 @@ if (VFLOW_CLICK_ACTION == "click") {
     launchFromClick(parseClickPayload(input));
 } else if (tiggerTag == VFLOW_MANUAL_LABEL || (DebugMode == false && isRunAction == true)) {
     if (showManualActionsUI() === "update") {
-        // ⚠️ 更新器是**独立文件**（docs/UPDATE.md §7）—— 只有「路径」一个契约，
-        //    eval 进**同一作用域**后它顶层自己开跑（不自我更新，改它要手动 push）。
-        // ⚠️ 变量名用 VFLOW_UPDATE_CODE 而**不是** `code`：顶层 `var` 是共享作用域，
-        //    通用名有撞掉 core.js 已有全局的风险。
+        // ⚠️ 更新逻辑在**工作流脚本**里（`src/bootstrap.js`，见 docs/UPDATE.md §7）——
+        //    它在**顶层** `eval(主脚本)` ⇒ 两者**共享同一作用域**：
+        //    bootstrap 的 `vflowUpdateRun` 在这里直接可见，**不用传参、不用读文件**。
+        //    （上一版是「读 update.js + eval」，那个独立文件已删。）
         // ⚠️ 这里**不加**就地标记（那 12 处标的是「相对上游的 5 类移植改动」）——
         //    本行是**新增功能**（上游没有更新器），不是移植改动点；
         //    加了会让 test/run.js 的「恰好 12 处」断言变红。
-        var VFLOW_UPDATE_CODE = VFLOW_ADAPTER.readText(FLUID_CLOUD_DIR + "/update.js");
-        if (VFLOW_UPDATE_CODE === null || VFLOW_UPDATE_CODE.length < 100) {
-            // ⚠️ **必须显式报错**（UPDATE.md §7.4 约束 3）—— 静默的表现是
-            //    「点了检查更新，什么都没发生」，用户完全无从判断。
+        if (typeof vflowUpdateRun !== "function") {
+            // ⚠️ **必须显式报错** —— 静默的表现是「点了检查更新，什么都没发生」。
+            //    触发条件：用户导入的是**旧工作流**（script 还是老 bootstrap），
+            //    或工作流的 script 被手改过。
             // ⚠️ 走 VFLOW_ADAPTER.toast 而**不是** showToast：后者受全局 `show_toast`
             //    开关控制，用户关掉提示时这条错误会被吞掉（那正是要防的静默）。
-            VFLOW_ADAPTER.toast("更新器缺失或内容异常，请 push dist/update.js 到 " + FLUID_CLOUD_DIR + "/");
+            VFLOW_ADAPTER.toast("当前工作流版本过旧（缺更新逻辑），请重新导入 workflow/fluid-cloud.json");
         } else {
-            // ⚠️ 这道闸让 update.js「只加载不执行」成为可能（离线测试要用）；
-            //    在这里设 true，eval 之后 update.js 末尾那道闸就会放行主流程。
-            var VFLOW_UPDATE_ENABLED = true;
-            eval(VFLOW_UPDATE_CODE);
+            vflowUpdateRun();
         }
     }
 } else {

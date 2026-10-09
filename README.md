@@ -36,19 +36,21 @@ npm run build     # 两步全跑：合并规则 → 拼接脚本
 ```bash
 node src/bundle-rules.js       # 1. 合并 src/rules/ → dist/rules.json
 node src/generate.js           # 2. adapter + core → dist/vflow-fluid-cloud.js
-                               #    同时 → dist/update.js（独立更新器，**不并进主脚本**）
 python tools/build-workflow.py # 3. bootstrap.js → workflow/fluid-cloud.json（改了脚本才要跑）
 ```
 
-> ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
+> ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的那段脚本本身），
 > **不是生成器** —— 没有「跑一下生成 dist/bootstrap.js」这回事。
 > 但它的**全文会进工作流 JSON** ⇒ 改它之后必须跑 `tools/build-workflow.py` 刷新
 > `workflow/fluid-cloud.json`，否则**导入到设备上的还是旧脚本**（两边都看不出来）。
+>
+> ⚠️⚠️ **更新逻辑就在 `src/bootstrap.js` 里**（2026-10-09 从独立文件搬进来的）⇒
+> **改更新逻辑 = 重新导入工作流**。
 
 ## 测试
 
 ```bash
-npm test          # 等价于 node test/run.js（104 例）
+npm test          # 等价于 node test/run.js（110 例）
 npm run check     # build + 语法检查 + test
 ```
 
@@ -60,23 +62,20 @@ npm run check     # build + 语法检查 + test
 ```bash
 export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/Git/sdcard
 
-# 1. 规则库（首次；脚本首次运行会自检并在缺失时报错）
+# 0. ⭐ **全新设备只要这一步** —— 导入工作流 + 跑一次，其余三份自动下载
+#    （首次自足，见 docs/UPDATE.md §4.0）。下面 1~3 是「不想联网」时的手工替代。
+python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
+                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
+
+# 1. 规则库（可选；缺失时脚本会**自动下载**）
 adb push dist/rules.json       /sdcard/vFlow/fluid-cloud/
 adb push dist/nolinkrules.json /sdcard/vFlow/fluid-cloud/
 
-# 2. 完整脚本（⚠️ 每次改了脚本都要重推）
+# 2. 完整脚本（可选；改了脚本不推的话，下次执行会**自动下载**新的）
 adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
-
-# 2b. 更新器（⚠️ **独立文件** —— 只在它自己改了时才推。
-#     更新流程**不会**更新它，见 docs/UPDATE.md §7.3）
-adb push dist/update.js        /sdcard/vFlow/fluid-cloud/
 
 # 3. 版本号（给更新机制用，见 docs/UPDATE.md §4.3）
 adb push version /sdcard/vFlow/fluid-cloud/version
-
-# 4. 工作流 —— ⭐ 走**导入**，不走 API
-python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
-                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
 ```
 
 > ⚠️ **为什么工作流走导入而不是 API**：远程 API 的 `POST /api/v1/workflows` 用的是
@@ -113,10 +112,14 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
 > 一次执行里必然有一路是这个形态，脚本侧要在 `src/adapter.js` 的 `input` 里认出来当空处理，
 > 否则会拿它去识别链接、**弹一个无意义的岛且不报错**。详见 `docs/DESIGN.md` §4.6。
 
-⚠️ **为什么工作流里放的是 `bootstrap.js` 而不是完整脚本**：完整脚本 113 KB，
+⚠️ **为什么工作流里放的是 `bootstrap.js` 而不是完整脚本**：完整脚本 148 KB，
 而工作流 JSON 里塞这么一大段，**每次改脚本都要重新导入一次工作流**
-（改脚本本该只是 `adb push` 的事）。引导脚本只有约 2 KB，
-它从设备文件读完整脚本并 `eval`。⇒ **改脚本只需 `adb push`，不用动工作流。**
+（改脚本本该只是 `adb push` 的事）。工作流脚本约 20 KB，
+它从设备文件读完整脚本并 `eval`。⇒ **改主脚本只需 `adb push`，不用动工作流。**
+
+> ⚠️⚠️ **例外：更新逻辑本身就在那段脚本里**（2026-10-09）⇒ 改**它**必须
+> 重新导入工作流。这是「导入即自足」这个目标换来的一处代价，见
+> [`docs/UPDATE.md`](docs/UPDATE.md) §7.3。
 
 ## 改造点（相对上游）
 
@@ -136,18 +139,21 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
 
 ## 脚本更新机制（**✅ 已实施，2026-10-09**）
 
-一句话：**设置菜单点「检查更新」→ `core.js` 读设备上的 `update.js` 并调用它 →
-从 GitHub 官方 raw 拉产物 → 主脚本整份覆盖 / 规则增量合并 → 提示「下次执行生效」**。
+一句话：**导入工作流 + 跑一次即自足** ——
+工作流脚本（`src/bootstrap.js`）发现设备上缺产物，就从 GitHub 官方 raw 拉全套；
+之后**设置菜单点「检查更新」**→ 调同一个脚本里的 `vflowUpdateRun()` →
+主脚本整份覆盖 / 规则增量合并 → 提示「下次执行生效」。
 
 | 文件 | 策略 | 谁写 |
 |---|---|---|
-| `vflow-fluid-cloud.js` | **整份覆盖**（写 `.tmp` → 校验 → `renameTo`） | `update.js` |
-| `rules.json` / `nolinkrules.json` | **增量合并**（按 `name`） | `update.js` |
+| `vflow-fluid-cloud.js` | **整份覆盖**（写 `.tmp` → 校验 → `renameTo`） | 工作流脚本 |
+| `rules.json` / `nolinkrules.json` | **增量合并**（按 `name`）；首次自足时整份覆盖 | 工作流脚本 |
 | `config.json` | **增量合并**（基准 = 主脚本内置 `DEFAULT_CONFIG`，版本闸控制） | `adapter.js`（每次执行） |
-| ⚠️ **`update.js`** | **不更新** —— 更新流程不拉、不写它；要改就**手动 push** | 人工 |
+| ⚠️ **工作流脚本自己**（= 更新逻辑） | **不更新** —— 它更新不了自己；要改就**重新导入工作流** | 人工 |
 
-⭐ **`update.js` 是独立文件**（`src/update.js` → `dist/update.js` → 设备上同名），
-**不并进主脚本、也不自我更新** —— 它是「脚本坏了能修脚本」的唯一安全网。
+⭐ **更新逻辑在工作流脚本里**（`src/bootstrap.js`，随 `workflow/fluid-cloud.json` 走），
+**不并进主脚本、也不自我更新** —— 它在主脚本**之外**，所以主脚本坏了它能修；
+而它自己坏了**只能重新导入工作流**（这是新的唯一救援通道）。
 
 - **只走 GitHub 官方 raw**（`raw.githubusercontent.com/nightking8342/vflow-fluid-cloud/main/…`），
   **不做镜像**，连通性交给用户
@@ -169,8 +175,9 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
   **按钮只发一条固定 action 的广播**，由 vFlow 的**广播触发器**接住并执行打开。
   ⇒ 脚本不当接收方，也就不需要 `new` 任何东西。
   真机验证：点击回传 → 工作流 → `mode=freeform` 小窗打开 ✅
-- ✅ **脚本更新机制已实施**（2026-10-09）：设置菜单点【检查更新】→ 读设备上的
-  `update.js` 并 `eval` → 从 GitHub 官方 raw 拉产物 → 主脚本整份覆盖、
-  规则/配置增量合并 → 提示「下次执行生效」。见 [`docs/UPDATE.md`](docs/UPDATE.md)。
-  ⚠️ 真机验证状态见该文档 §10（其中 `renameTo` 原子性、HTTP 桥接、`eval` 作用域
-  三项**必须在真机上确认**）
+- ✅ **脚本更新机制已实施**（2026-10-09）：**导入工作流 + 跑一次即自足**；
+  之后设置菜单点【检查更新】→ 调工作流脚本里的 `vflowUpdateRun()` →
+  从 GitHub 官方 raw 拉产物 → 主脚本整份覆盖、规则/配置增量合并 →
+  提示「下次执行生效」。见 [`docs/UPDATE.md`](docs/UPDATE.md)。
+  ⚠️ 真机验证状态见该文档 §10（其中 `renameTo` 原子性、HTTP 桥接、
+  `eval` 后主脚本能否看到 bootstrap 的全局 —— 三项**必须在真机上确认**）

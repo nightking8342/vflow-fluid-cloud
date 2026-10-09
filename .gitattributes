@@ -17,8 +17,8 @@
 workflow/*.json  -text
 
 # `dist/` 入库后的产物（2026-10-09）。理由与上面那条**完全相同**：
-# `dist/vflow-fluid-cloud.js` / `dist/update.js` 是文本，`dist/*.json` 是 JSON，
-# 而更新器**逐字节比对**长度与内容（`docs/UPDATE.md` §5.5），
+# `dist/vflow-fluid-cloud.js` 是文本，`dist/*.json` 是 JSON，
+# 而更新逻辑**逐字节比对**长度与内容（`docs/UPDATE.md` §5.5），
 # 两份 `version` 也做**字符串相等**比较 ⇒ 检出时被转成 CRLF 会**静默**地
 # 让「已是最新」永远判不相等（本机 `core.autocrlf=true`，工作区是 LF ⇒ 本机测不出）。
 dist/*.js    -text

@@ -1,6 +1,6 @@
 {
   "name": "vflow-fluid-cloud",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "vFlow 流体云：分享链接识别 → 超级岛/浮窗提示 → 全屏或小窗打开",
   "scripts": {
@@ -9,7 +9,7 @@
     "build:script": "node src/generate.js",
     "build:workflow": "python tools/build-workflow.py",
     "test": "node test/run.js",
-    "check": "npm run build && node --check dist/vflow-fluid-cloud.js && node --check dist/update.js && node --check src/bootstrap.js && npm test"
+    "check": "npm run build && node --check dist/vflow-fluid-cloud.js && node --check src/bootstrap.js && npm test"
   },
   "engines": {
     "node": ">=18"

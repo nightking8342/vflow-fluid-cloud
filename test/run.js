@@ -21,8 +21,10 @@ const { runScript, calls, ROOT, resetStorage, mapPath, httpBox } = require('./ha
 const SCRIPT_PATH = path.join(ROOT, 'dist', 'vflow-fluid-cloud.js');
 const scriptText = fs.readFileSync(SCRIPT_PATH, 'utf8');
 
-const UPDATE_PATH = path.join(ROOT, 'dist', 'update.js');
-const updateText = fs.readFileSync(UPDATE_PATH, 'utf8');
+// ⚠️ 更新逻辑在 `src/bootstrap.js` 里（工作流那段 script，见 docs/UPDATE.md §7）。
+//    离线测试直接 eval 源码（它不进 dist/ —— dist/ 只有主脚本 + 两份规则库）。
+const BOOTSTRAP_PATH = path.join(ROOT, 'src', 'bootstrap.js');
+const bootstrapText = fs.readFileSync(BOOTSTRAP_PATH, 'utf8');
 
 const CLOUD_DIR = mapPath('/sdcard/vFlow/fluid-cloud');
 const UPDATE_URLS = {
@@ -929,16 +931,16 @@ test('reference/ 是完整镜像（未移植的文件也留着，它们是对照
     // 与 src/ 的对应关系：core.js 是移植过的，onOpen/update 没有
     assert(fs.existsSync(path.join(ROOT, 'src', 'core.js')), 'src/core.js 应在（core.js 已移植）');
     assert(!fs.existsSync(path.join(ROOT, 'src', 'onOpen.js')), 'src/ 不该有 onOpen.js（未移植）');
-    // ⚠️ **2026-10-09 翻转**：原来是「src/ 不该有 update.js（未移植）」。
-    //    现在**更新机制已实施**，`src/update.js` 是**新写的更新器**（不是上游那份的移植）。
-    //    上游那份 `reference/update.js` 仍作对照基线留着。
-    assert(fs.existsSync(path.join(ROOT, 'src', 'update.js')), 'src/update.js 应在（更新器已实施）');
-    // ⚠️ **反向锁**：它必须是**新写的**，不能是把上游那份拷过来改个名 ——
-    //    上游那份做的是「老格式规则转换 + 非原子写」，与本项目定案（按 name 合并 + 原子写）不同。
-    const srcUpdate = fs.readFileSync(path.join(ROOT, 'src', 'update.js'), 'utf8').replace(/\r\n/g, '\n');
+    // ⚠️ **2026-10-09 二次翻转**：曾经有过 `src/update.js`（独立更新器），
+    //    后来用户要求把更新逻辑搬进**工作流脚本**（`src/bootstrap.js`）⇒ 它又没了。
+    //    上游那份 `reference/update.js` 仍作对照基线留着（它做的是「老格式规则转换 +
+    //    非原子写」，与本项目定案「按 name 合并 + 原子写」不同，**没有**被照抄）。
+    assert(!fs.existsSync(path.join(ROOT, 'src', 'update.js')),
+        'src/update.js 不该再存在（更新逻辑已搬进 src/bootstrap.js）');
+    const bs = readSrc('bootstrap.js');
+    assert(bs.includes('vflowUpdateRun'), 'src/bootstrap.js 里应有更新逻辑');
     const refUpdate = fs.readFileSync(path.join(dir, 'update.js'), 'utf8').replace(/\r\n/g, '\n');
-    assert(srcUpdate !== refUpdate, 'src/update.js 不该照抄上游 reference/update.js');
-    assert(srcUpdate.includes('vflowUpdateRun'), 'src/update.js 不像是本项目的更新器');
+    assert(bs.replace(/\r\n/g, '\n') !== refUpdate, 'bootstrap.js 不该照抄上游 reference/update.js');
 
     // 镜像必须逐字节一致（抽两个文件核，全量 diff 太重）
     const sameAs = (rel) => {
@@ -1016,11 +1018,12 @@ console.log('\n[12] 更新机制（docs/UPDATE.md）');
 
 // ⚠️ 本节沿用 [2] 节的「产物 + 源码两路」风格。
 //
-// ⚠️⚠️ **怎么在离线测试里跑 update.js**：它「顶层直接开跑」，一 eval 就会发网络请求。
-//    ⇒ 靠它末尾那道闸（`VFLOW_UPDATE_ENABLED`）：不设就**只加载不执行**，
-//      纯函数（校验 / 合并）可以直接测。要测主流程时，在**同一个沙箱**里
-//      `vm.runInContext(updateText, ctx)`（此时脚本顶层的 `VFLOW_UPDATE_ENABLED`
-//      已存在 = true）—— 那正是「eval 进主脚本作用域」的形态（UPDATE.md §7.4 约束 2）。
+// ⚠️⚠️ **怎么在离线测试里跑更新逻辑**：它在 `src/bootstrap.js` 里（工作流那段 script），
+//    而 bootstrap「顶层直接开跑」（首次自足 + eval 主脚本）。
+//    ⇒ 靠它末尾那道闸（`VFLOW_BOOTSTRAP_DISABLED`）：设 true ⇒ **只加载不执行**，
+//      纯函数（校验 / 合并 / 原子写）可以直接测。要测主流程时，在**同一个沙箱**里
+//      `vm.runInContext(bootstrapText, ctx)`（不设那道闸）—— 那正是
+//      「工作流脚本 eval 主脚本」的形态（UPDATE.md §7）。
 
 /**
  * 起一个沙箱，**加载主脚本**（会写 config 自举），返回 `{ sandbox, calls, context }`。
@@ -1035,14 +1038,25 @@ function loadMain() {
     return run({ text: 'x' });
 }
 
-/** 在已有沙箱里 eval 更新器（不设 `VFLOW_UPDATE_ENABLED` ⇒ 只定义、不跑主流程）。 */
+/**
+ * 在已有沙箱里 eval **工作流脚本**（bootstrap）—— 只定义、不跑主流程。
+ *
+ * ⚠️ 靠它末尾那道闸（`VFLOW_BOOTSTRAP_DISABLED`）：设 true ⇒ 不联网、不 eval 主脚本，
+ *    纯函数（校验 / 合并 / 原子写）可以直接测。
+ */
 function loadUpdate(ctx) {
-    vm.runInContext(updateText, ctx, { filename: 'update.js' });
+    vm.runInContext('var VFLOW_BOOTSTRAP_DISABLED = true;\n' + bootstrapText, ctx, { filename: 'bootstrap.js' });
 }
 
-/** 在已有沙箱里 eval 更新器**并放行主流程**。 */
+/**
+ * 在已有沙箱里 eval bootstrap，然后**显式调手动更新主流程**。
+ *
+ * ⚠️ 这是 core.js「检查更新」那条路的形态：bootstrap 已在（工作流脚本），
+ *    `vflowUpdateRun()` 在同一作用域里直接可见 ⇒ 直接调，不跑自足检查。
+ */
 function runUpdate(ctx) {
-    vm.runInContext('var VFLOW_UPDATE_ENABLED = true;\n' + updateText, ctx, { filename: 'update.js' });
+    loadUpdate(ctx);
+    vm.runInContext('vflowUpdateRun();', ctx, { filename: 'vflowUpdateRun' });
 }
 
 /** 配远端响应（url → body/status），未配的一律 404（见 harness 的 httpBox）。 */
@@ -1333,15 +1347,25 @@ test('version 相同 ⇒ 弹「已是最新」；选「否」⇒ 一个文件都
     assert(c.toast.some((t) => String(t).includes('已取消')), '应提示「已取消」');
 });
 
-test('⭐ 缺失显式弹错：读不到 update.js 时走手动分派 ⇒ 弹「更新器缺失」，不是静默', () => {
-    // 删掉 update.js，跑一次「设置」标签的手动分派（autoDismissIndex = 3 = 「检查更新」）
-    fs.rmSync(path.join(CLOUD_DIR, 'update.js'), { force: true });
-    const { calls: c } = run({ text: '', tag: '设置', autoDismissIndex: 3 });
-    assert(c.toast.some((t) => String(t).includes('更新器缺失')),
-        `点了「检查更新」但 update.js 缺失时必须显式弹错：${JSON.stringify(c.toast)}`);
+test('⭐ 缺失显式弹错：工作流脚本过旧（没有 vflowUpdateRun）⇒ 弹「重新导入工作流」，不是静默', () => {
+    // 跑一次「设置」标签的手动分派（autoDismissIndex = 3 = 「检查更新」），
+    // 但**不让 bootstrap 参与** ⇒ 模拟「用户导入的是旧工作流」：
+    // 旧工作流的 script 里没有 vflowUpdateRun，core.js 的检查必须显式报错。
+    installRules();
+    const { calls: c } = runScript(scriptText, {
+        inputs: {
+            click_uri: UNRESOLVED('fluid_click_broadcast', 'data_uri'),
+            clipboard_text: '',
+            trigger_label: '设置'
+        },
+        vars: {},
+        __androidOpts: { autoDismissIndex: 3 }
+    });
+    assert(c.toast.some((t) => String(t).includes('重新导入')),
+        `点了「检查更新」但工作流过旧时必须显式弹错：${JSON.stringify(c.toast)}`);
 });
 
-test('⭐ 失败提示不被 show_toast 开关吞掉（走 VFLOW_ADAPTER.toast 而非 showToast）', () => {
+test('⭐ 失败提示不被 show_toast 开关吞掉（走 vflow.device.toast，不经 showToast）', () => {
     const { sandbox, context, calls: c } = loadMain();
     loadUpdate(context);
     // 用户关掉提示开关
@@ -1356,14 +1380,23 @@ test('⭐ 失败提示不被 show_toast 开关吞掉（走 VFLOW_ADAPTER.toast �
 test('「检查更新」菜单项存在（源码 + 产物两路）', () => {
     assert(readSrc('core.js').includes('"检查更新"'), 'src/core.js 的菜单里没有「检查更新」');
     assert(scriptText.includes('"检查更新"'), '产物里没有「检查更新」');
-    // 反向锁：它必须返回哨兵 "update"（顶层分派靠它做「读 + eval」）
+    // 反向锁：它必须返回哨兵 "update"（顶层分派靠它调更新逻辑）
     assert(/return "update"/.test(readSrc('core.js')), '没返回哨兵 "update"');
 });
 
-test('主脚本**不含** update.js 的内容（它必须是独立文件）', () => {
-    assert(!scriptText.includes('vflowUpdateRun'), '主脚本里混进了更新器（vflowUpdateRun）');
-    assert(!scriptText.includes('VFLOW_UPDATE_BASE_URL'), '主脚本里混进了更新器（远端基址）');
-    assert(!scriptText.includes('raw.githubusercontent.com'), '主脚本里出现了远端地址 —— 更新器没独立出去？');
+test('⭐ 更新逻辑在 bootstrap 里，且**不在**主脚本产物里', () => {
+    const bs = readSrc('bootstrap.js');
+    assert(bs.includes('vflowUpdateRun'), 'bootstrap.js 里没有更新主流程');
+    assert(bs.includes('raw.githubusercontent.com'), 'bootstrap.js 里没有远端地址');
+    // ⚠️ 反向锁：主脚本**不含更新逻辑的实体**（它只在工作流那段 script 里）——
+    //    混进去就意味着「每次执行都要 parse 那几百行」，而且产物里会多一份远端地址。
+    //    ⚠️ core.js 里**会**出现 `vflowUpdateRun()` 这个**调用**（那是接口，见下一条），
+    //       所以这里判的是**定义/实现**，不是名字。
+    assert(!scriptText.includes('function vflowUpdateRun('), '主脚本里混进了更新主流程的实现');
+    assert(!scriptText.includes('VFLOW_UPDATE_BASE_URL'), '主脚本里混进了更新逻辑（远端基址）');
+    assert(!scriptText.includes('raw.githubusercontent.com'), '主脚本里出现了远端地址');
+    // 正向：core.js 的「检查更新」是**调**那个函数（同一个作用域，见 docs/UPDATE.md §7）
+    assert(scriptText.includes('vflowUpdateRun()'), 'core.js 没有调用工作流里的 vflowUpdateRun()');
 });
 
 test('ensureRules 用 exists() + 长度下界（源码侧锚）', () => {
@@ -1374,31 +1407,31 @@ test('ensureRules 用 exists() + 长度下界（源码侧锚）', () => {
         'ensureRules 还在读全文只为判存在（应改为 exists() + length()）');
 });
 
-test('update.js 里 renameTo 检查了返回值（原子写不能只调不看）', () => {
-    const u = readSrc('update.js');
-    assert(u.includes('renameTo'), 'update.js 没有 renameTo');
+test('bootstrap 里 renameTo 检查了返回值（原子写不能只调不看）', () => {
+    const u = readSrc('bootstrap.js');
+    assert(u.includes('renameTo'), 'bootstrap.js 没有 renameTo');
     // 必须把返回值接住并判（`ok = …renameTo(…)` + `if (!ok)`）
     assert(/=\s*new java\.io\.File\(tmp\)\.renameTo\(/.test(u), 'renameTo 的返回值没被接住');
     assert(/if \(!ok\)/.test(u), 'renameTo 的返回值没被检查');
 });
 
-test('update.js 末尾是闸而不是裸顶层调用（否则离线一加载就发网络请求）', () => {
-    const u = readSrc('update.js');
-    assert(/if \(typeof VFLOW_UPDATE_ENABLED !== "undefined" && VFLOW_UPDATE_ENABLED\)/.test(u),
-        'update.js 末尾不是 VFLOW_UPDATE_ENABLED 闸');
-    // 反向锁：不能有裸的顶层 `vflowUpdateRun();`
-    assert(!/^vflowUpdateRun\(\);/m.test(u), 'update.js 有裸顶层调用 —— 会污染离线测试');
+test('bootstrap 末尾是闸而不是裸顶层调用（否则离线一加载就发网络请求）', () => {
+    const u = readSrc('bootstrap.js');
+    assert(/if \(typeof VFLOW_BOOTSTRAP_DISABLED === "undefined" \|\| !VFLOW_BOOTSTRAP_DISABLED\)/.test(u),
+        'bootstrap.js 末尾不是 VFLOW_BOOTSTRAP_DISABLED 闸');
+    // 反向锁：不能有裸的顶层 `vflowBootstrapMain();`
+    assert(!/^vflowBootstrapMain\(\);/m.test(u), 'bootstrap.js 有裸顶层调用 —— 会污染离线测试');
 });
 
-test('HTTP 调用传了 timeout=30（默认 10 秒拉 144 KB 会超时）', () => {
-    const u = readSrc('update.js');
+test('HTTP 调用传了 timeout=30（默认 10 秒拉 150 KB 会超时）', () => {
+    const u = readSrc('bootstrap.js');
     assert(/VFLOW_UPDATE_TIMEOUT = 30/.test(u), 'timeout 不是 30');
     assert(/timeout: VFLOW_UPDATE_TIMEOUT/.test(u), 'http_request 没传 timeout');
     // 反向锁：不能传 proxy 参数（连通性交给用户 ⇒ 跟随全局，UPDATE.md §1 第 1/2 条）。
     // ⚠️ 必须剥注释后判 —— 文件里那段解释「为什么**不**传 proxy_mode」的注释
     //    本身含这个词，不剥会误报（与 [2] 节 stripComments 的用途同理）。
     const uCode = stripComments(u);
-    assert(!/proxy_mode/.test(uCode), 'update.js 传了 proxy_mode —— 应跟随全局代理');
+    assert(!/proxy_mode/.test(uCode), 'bootstrap.js 传了 proxy_mode —— 应跟随全局代理');
 });
 
 // ===========================================================================
@@ -1419,13 +1452,13 @@ test('dist/ 里的两个产物 == 现在重跑一次 generate 的输出（逐字
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vfc-gen-'));
     try {
         fs.mkdirSync(path.join(tmpRoot, 'src'), { recursive: true });
-        for (const f of ['adapter.js', 'core.js', 'update.js', 'generate.js']) {
+        for (const f of ['adapter.js', 'core.js', 'generate.js']) {
             fs.copyFileSync(path.join(ROOT, 'src', f), path.join(tmpRoot, 'src', f));
         }
         // `ROOT` 由 `__dirname/..` 推出 ⇒ 临时目录自成一体
         execFileSync(process.execPath, [path.join(tmpRoot, 'src', 'generate.js')], { cwd: tmpRoot });
 
-        for (const f of ['vflow-fluid-cloud.js', 'update.js']) {
+        for (const f of ['vflow-fluid-cloud.js']) {
             const fresh = fs.readFileSync(path.join(tmpRoot, 'dist', f));
             const committed = fs.readFileSync(path.join(ROOT, 'dist', f));
             assert(fresh.equals(committed),
@@ -1436,13 +1469,155 @@ test('dist/ 里的两个产物 == 现在重跑一次 generate 的输出（逐字
     }
 });
 
-test('dist/update.js 存在，且其内容 = banner + src/update.js', () => {
-    assert(fs.existsSync(UPDATE_PATH), 'dist/update.js 不存在 —— npm run build 的第二输出没生效？');
-    assert(updateText.includes('vflowUpdateRun'), 'dist/update.js 不像更新器');
-    assert(updateText.includes(readSrc('update.js').slice(0, 200)),
-        'dist/update.js 不是 src/update.js 的内容');
-    // ⚠️ 反向锁：产物带「不要手改」banner
-    assert(/不要手改/.test(updateText), 'dist/update.js 缺「构建产物、勿手改」banner');
+test('dist/ 只有三个产物（更新逻辑已搬进工作流 ⇒ 不该有 dist/update.js）', () => {
+    const files = fs.readdirSync(path.join(ROOT, 'dist')).sort();
+    assertEq(files, ['nolinkrules.json', 'rules.json', 'vflow-fluid-cloud.js'],
+        'dist/ 的产物集合变了 —— 更新逻辑不该再产出独立文件（见 docs/UPDATE.md §7）');
+});
+
+test('⭐ 工作流 script 里有更新逻辑（导入即自足的关键）', () => {
+    const wf = JSON.parse(fs.readFileSync(path.join(ROOT, 'workflow', 'fluid-cloud.json'), 'utf8'));
+    const script = wf.steps[0].parameters.script;
+    assert(script.includes('vflowUpdateRun'), '工作流 script 里没有更新主流程 —— 导入后没法自足');
+    assert(script.includes('vflowBootstrapEnsureFiles'), '工作流 script 里没有首次自足检查');
+    assert(script.includes('raw.githubusercontent.com'), '工作流 script 里没有远端地址');
+});
+
+// ===========================================================================
+// [14] 首次自足（导入工作流 + 跑一次 ⇒ 全就位，见 docs/UPDATE.md §7）
+// ===========================================================================
+console.log('\n[14] 首次自足（bootstrap 缺什么拉什么）');
+
+/** 把设备目录清空（模拟「刚导入工作流、什么都没 push」）。 */
+function wipeDeviceFiles() {
+    for (const f of ['vflow-fluid-cloud.js', 'rules.json', 'nolinkrules.json', 'version']) {
+        fs.rmSync(path.join(CLOUD_DIR, f), { force: true });
+    }
+}
+
+/**
+ * 跑一次**完整 bootstrap**（含首次自足 + eval 主脚本）。
+ *
+ * ⚠️ 不能复用 `run()` —— 那个是「主脚本已经在了」的形态。这里要模拟
+ *    工作流脚本从零开始：先 eval bootstrap，再由它自己决定拉不拉。
+ * @returns {{sandbox:object, calls:object, context:object, threw:Error|null}}
+ */
+function runBootstrap(text, opts) {
+    const o = opts || {};
+    const isClick = typeof text === 'string' && text.indexOf('vflowfc://') === 0;
+    const ctxVars = {
+        inputs: {
+            click_uri: isClick ? text : UNRESOLVED('fluid_click_broadcast', 'data_uri'),
+            clipboard_text: isClick ? UNRESOLVED('fluid_trigger_clipboard', 'text_content') : (text || ''),
+            trigger_label: o.tag !== undefined ? o.tag : '剪切板'
+        },
+        vars: {},
+        __androidOpts: { browserPackage: 'com.android.chrome' }
+    };
+    // ⚠️ 先跑一个「空」主脚本占位，把 harness 的 java/android/vflow stub 装好，
+    //    再把设备文件清掉 ⇒ 这才像「工作流脚本在，设备上什么都没有」。
+    const boot = runScript('', ctxVars);
+    // ⚠️ `keep: true` 时**不清**设备文件 —— 「第一次自足 → 第二次执行」这种用例
+    //    必须保留上一轮下下来的产物，否则永远走「缺文件」分支，测不出「齐全不联网」。
+    if (!o.keep) wipeDeviceFiles();
+    let threw = null;
+    try {
+        vm.runInContext(bootstrapText, boot.context, { filename: 'bootstrap.js' });
+    } catch (e) {
+        threw = e;
+    }
+    if (process.env.VFC_DEBUG) {
+        console.log('    [debug] threw=' + (threw && threw.message));
+        console.log('    [debug] files=' + JSON.stringify(fs.readdirSync(CLOUD_DIR)));
+        console.log('    [debug] reqs=' + JSON.stringify(httpBox.requests.map((r) => r.url)));
+        console.log('    [debug] mainLen=' + vm.runInContext(
+            'typeof VFLOW_MAIN_CODE !== "undefined" ? String(VFLOW_MAIN_CODE).length : "none"', boot.context));
+        console.log('    [debug] marker=' + vm.runInContext('typeof FLUID_CLOUD_ACTION_CLICK', boot.context));
+    }
+    return { sandbox: boot.sandbox, calls: boot.calls, context: boot.context, threw };
+}
+
+test('⭐ 三份都缺 ⇒ 拉全套四份并写盘，且**主脚本被 eval**（导入即自足）', () => {
+    mockRemote({
+        [UPDATE_URLS.version]: '0.4.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'R1' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'N1' }])
+    });
+    const { calls: c, threw, context } = runBootstrap('x');
+
+    assertEq(threw, null, `自足不该抛错：${threw && threw.message}`);
+    // 四份都被拉（缺三份 ⇒ 整组拉，见 bootstrap 的注释）
+    const urls = httpBox.requests.map((r) => r.url);
+    for (const u of [UPDATE_URLS.version, UPDATE_URLS.script, UPDATE_URLS.rules, UPDATE_URLS.nolinkrules]) {
+        assert(urls.includes(u), `没拉 ${u}`);
+    }
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'vflow-fluid-cloud.js'), 'utf8'), FAKE_MAIN, '主脚本没写盘');
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'version'), 'utf8'), '0.4.0', 'version 没写盘');
+    assertEq(JSON.parse(fs.readFileSync(path.join(CLOUD_DIR, 'rules.json'), 'utf8')).map((x) => x.name), ['R1']);
+    assertEq(JSON.parse(fs.readFileSync(path.join(CLOUD_DIR, 'nolinkrules.json'), 'utf8')).map((x) => x.name), ['N1']);
+    // ⭐ 主脚本被 eval 了（FAKE_MAIN 里有 var FLUID_CLOUD_ACTION_CLICK ⇒ 落到沙箱全局）
+    assertEq(vm.runInContext('typeof FLUID_CLOUD_ACTION_CLICK', context), 'string',
+        '主脚本没被 eval —— 下载完就用不上，本次执行等于白跑');
+});
+
+test('⭐ 主脚本存在但被截断 ⇒ 重新下载（bootstrap 是主脚本之外的那一层，能自愈）', () => {
+    mockRemote({
+        [UPDATE_URLS.version]: '0.4.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'R1' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'N1' }])
+    });
+    // 先正常自足一次（四份就位），再把主脚本改成「半截」
+    runBootstrap('x');
+    const scriptPath = path.join(CLOUD_DIR, 'vflow-fluid-cloud.js');
+    fs.writeFileSync(scriptPath, '// 半截文件', 'utf8');
+
+    mockRemote({
+        [UPDATE_URLS.version]: '0.4.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'R1' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'N1' }])
+    });
+    const { threw } = runBootstrap('x');
+    assertEq(threw, null, '自愈不该抛错');
+    assertEq(fs.readFileSync(scriptPath, 'utf8'), FAKE_MAIN, '被截断的主脚本没被修复');
+});
+
+test('⭐ 四份齐全 ⇒ **一个网络请求都不发**（老用户不该每次执行都下载 150 KB）', () => {
+    mockRemote({
+        [UPDATE_URLS.version]: '0.4.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'R1' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'N1' }])
+    });
+    runBootstrap('x'); // 第一次：自足
+    mockRemote({});    // 第二次：不许再联网
+    runBootstrap('x', { keep: true }); // 保留上一轮下下来的产物
+    assertEq(httpBox.requests.length, 0, `齐全时仍发了 ${httpBox.requests.length} 个请求`);
+});
+
+test('⭐ 首次自足下载失败 ⇒ 显式报错且**不 eval 主脚本**（不能拿半份继续跑）', () => {
+    mockRemote({}); // 全部 404
+    const { calls: c, threw, context } = runBootstrap('x');
+    assert(threw !== null, '下载失败必须抛错（否则静默）');
+    assert(/首次初始化失败/.test(threw.message), `错误文案不对：${threw.message}`);
+    assert(c.toast.some((t) => String(t).includes('更新失败')), `必须弹错：${JSON.stringify(c.toast)}`);
+    assertEq(vm.runInContext('typeof FLUID_CLOUD_ACTION_CLICK', context), 'undefined',
+        '下载失败却 eval 了主脚本');
+});
+
+test('⭐ 主脚本内容校验不过（404 的 HTML）⇒ 不写盘、不 eval', () => {
+    mockRemote({
+        [UPDATE_URLS.version]: '0.4.0',
+        [UPDATE_URLS.script]: '<html>404 Not Found</html>',
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'R1' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'N1' }])
+    });
+    const { threw, context } = runBootstrap('x');
+    assert(threw !== null, 'HTML 当脚本必须抛错');
+    assert(!fs.existsSync(path.join(CLOUD_DIR, 'vflow-fluid-cloud.js')), 'HTML 被写成主脚本了');
+    assertEq(vm.runInContext('typeof FLUID_CLOUD_ACTION_CLICK', context), 'undefined', '却 eval 了');
 });
 
 // ===========================================================================

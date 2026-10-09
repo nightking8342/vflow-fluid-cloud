@@ -125,25 +125,24 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 │   ├── nolinkrules/      #   2 条无链接规则 ⇒ 已移植到 src/nolinkrules/
 │   ├── onOpen.js         #   223 行，指令启用时执行 ⇒ **未移植**（无对应时机）
 │   ├── update.js         #   647 行，远程更新 ⇒ **未移植**（被 docs/UPDATE.md 那套取代；
-│   │                     #   ⚠️ 但**留着**作对照 —— src/update.js 的「合并语义」是从它推出来的）
+│   │                     #   ⚠️ 但**留着**作对照 —— 我们的合并语义是从它推出来的）
 │   ├── ShortX-流体云组件3.7_超级岛版_.txt  # ⚠️ **不是上游源码** —— ShortX 规则分享文件，
 │   │                     #   记录「上游在 ShortX 侧怎么接线」（别处没有）
 │   └── version           #   `3.2.3`（⚠️ 与根目录的 version **不是一回事**）
 ├── src/                  # ✍️ 手写（我们维护的就是这些）
 │   ├── adapter.js        #   平台桥 VFLOW_ADAPTER + 全局变量 + 首次自举
 │   ├── core.js           #   ★ 核心逻辑（从上游移植后**就地维护**，直接改）
-│   ├── update.js         #   ⭐ **更新器**（独立文件，不进主脚本；**已实施**，见 docs/UPDATE.md）
 │   ├── bundle-rules.js   #   合并 src/rules/*.json → dist/rules.json
-│   ├── generate.js       #   adapter + core → dist/vflow-fluid-cloud.js（+ update.js 独立输出）
-│   ├── bootstrap.js      #   引导脚本**本身**（静态文件，不是生成器）
+│   ├── generate.js       #   adapter + core → dist/vflow-fluid-cloud.js
+│   ├── bootstrap.js      #   ⭐ **工作流脚本本身**（静态文件，不是生成器）：
+│   │                     #    首次自足（缺产物就拉全套）+ 更新逻辑 + eval 主脚本
 │   ├── rules/            #   27 个有链接规则（一文件一条）
 │   └── nolinkrules/      #   2 个无链接规则
 ├── workflow/             # 📄 工作流产物
 │   └── fluid-cloud.json  #   ★ 在 vFlow 里**导入**它就建好工作流（字段完整）
 ├── dist/                 # 🔨 构建产物（⚠️ **已入库**，见 docs/UPDATE.md §2.1）
-│   ├── vflow-fluid-cloud.js   # ★ 完整脚本（128 KB，adapter + core，**不含 updater**）→ push 到设备
-│   ├── update.js              # ★ 更新器（独立）→ push 到设备（⚠️ **更新流程不更新它**）
-│   ├── rules.json / nolinkrules.json  # ★ 规则库 → push 到设备
+│   ├── vflow-fluid-cloud.js   # ★ 完整脚本（148 KB，adapter + core）→ push 到设备
+│   └── rules.json / nolinkrules.json  # ★ 规则库 → push 到设备
 ├── test/                 # 离线测试（Node 模拟 Rhino + Android）
 └── tools/                # 刷新工作流产物 / 推送到设备 / 跑一次取日志
 ```
@@ -155,7 +154,7 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ```bash
 npm run build          # 两步全跑：合并规则 → 拼接脚本
 npm run build:workflow # bootstrap.js → workflow/fluid-cloud.json（改了它才要跑）
-npm test               # 离线测试（104 例）
+npm test               # 离线测试（110 例）
 npm run check          # build + 语法检查 + test
 
 # 单独跑某一步（改了什么跑什么）
@@ -164,11 +163,15 @@ node src/generate.js           # 改了 adapter.js 或 core.js 后
 python tools/build-workflow.py # 改了 bootstrap.js 后
 ```
 
-> ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的引导脚本本身），
+> ⚠️ `src/bootstrap.js` 是**静态文件**（内容就是贴进工作流的那段脚本本身），
 > **不是生成器**，没有「跑一下生成 dist/bootstrap.js」这回事。
 > 但它的**全文会进 `workflow/fluid-cloud.json`** ⇒ 改它之后必须跑
 > `python tools/build-workflow.py` 刷新，否则**导入到设备上的还是旧脚本**
 > （两边都看不出来 —— 这正是它被写进 `npm test` 的原因）。
+>
+> ⚠️⚠️ **更新逻辑就在 `src/bootstrap.js` 里**（2026-10-09 从独立文件搬进来的，
+> 见 `docs/UPDATE.md` §7）⇒ **改更新逻辑 = 改工作流脚本 = 重新导入工作流**，
+> 不再是「push 一个文件」。
 
 ---
 
@@ -177,23 +180,20 @@ python tools/build-workflow.py # 改了 bootstrap.js 后
 ```bash
 export MSYS_NO_PATHCONV=1      # ⚠️ Git Bash 下必须，否则 /sdcard 会被改写成 D:/Git/sdcard
 
-# 1. 规则库（首次；脚本首次运行会自检并在缺失时抛错）
+# 0. ⭐ **全新设备只要这一步** —— 导入工作流 + 跑一次，剩下三份自动下载
+#    （首次自足，见 docs/UPDATE.md §7）。下面 1~3 是「不想联网」时的手工替代。
+python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
+                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
+
+# 1. 规则库（可选；脚本首次运行会自检并在缺失时**自动下载**）
 adb push dist/rules.json       /sdcard/vFlow/fluid-cloud/
 adb push dist/nolinkrules.json /sdcard/vFlow/fluid-cloud/
 
-# 2. 完整脚本（⚠️ 每次改了脚本都要重推）
+# 2. 完整脚本（⚠️ 每次改了脚本都要重推；不推的话下次执行会**自动下载**新的）
 adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
-
-# 2b. 更新器（⚠️ **独立文件** —— 只在它自己改了时才推。
-#     更新流程**不会**更新它，所以它的改动只能这样手工推，见 docs/UPDATE.md §7.3）
-adb push dist/update.js        /sdcard/vFlow/fluid-cloud/
 
 # 3. 版本号（给更新机制用，见 docs/UPDATE.md §4.3）
 adb push version /sdcard/vFlow/fluid-cloud/version
-
-# 4. 工作流 —— ⭐ 走**导入**，不走 API（建一次，之后改脚本不用动它）
-python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → 唤起导入
-                                           # ⚠️ 设备上弹「冲突」时点【替换】才是更新
 ```
 
 ⚠️ **工作流走导入而不是 API**：API 的 `POST /api/v1/workflows`
@@ -206,7 +206,7 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
 ⚠️ **Windows + Git Bash 下 `adb push` 前要 `export MSYS_NO_PATHCONV=1`**，
 否则 `/sdcard/...` 会被 MSYS 改写成 `D:/Git/sdcard/...`（已实际踩过）。
 
-**为什么分两个文件**：完整脚本 113 KB —— 把它塞进工作流 JSON 意味着
+**为什么分两个文件**：完整脚本 148 KB —— 把它塞进工作流 JSON 意味着
 **每次改脚本都要重新导入一次工作流**（而改脚本本该只是 `adb push` 的事）。
 ⇒ 工作流里只放约 2 KB 的**引导脚本**，它从设备文件读完整脚本并 `eval`。
 **好处是改脚本只需 `adb push`，不用动工作流。**
@@ -347,10 +347,9 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 | 改了什么 | 要做什么 |
 |---|---|
-| `src/adapter.js` / `src/core.js` | `npm run check` + **重新 `adb push` 完整脚本** |
-| `src/update.js` | `npm run check` + **重新 `adb push` `dist/update.js`**（⚠️ **更新流程不会更新它**，见 `docs/UPDATE.md` §7.3） |
+| `src/adapter.js` / `src/core.js` | `npm run check` + **重新 `adb push` 完整脚本**（不推也行：下次执行会自动下载） |
+| ⚠️ `src/bootstrap.js`（**含更新逻辑**） | `npm run check` + `npm run build:workflow` + **导入工作流**（`tools/deploy-workflow.py`）。⚠️ 改更新逻辑**只能**这样生效 —— 它不是 push 一个文件的事 |
 | `src/rules/` / `src/nolinkrules/` | `npm run check` + 重新 push **两个 JSON** |
-| `src/bootstrap.js` | `npm run check` + `npm run build:workflow` + **导入工作流**（`tools/deploy-workflow.py`） |
 | `workflow/fluid-cloud.json`（改颜色 / 描述 / 各种开关） | **导入工作流**（`tools/deploy-workflow.py --no-build`） |
 | ⚠️ **触发器**（`triggers` 现在是**派生**的，见 `tools/build-workflow.py` 的 `TRIGGERS`） | 改 `build-workflow.py` → `python tools/build-workflow.py` → **导入工作流**。⚠️ **不要直接手改 JSON 里的 `triggers`** —— 下次刷新会被覆盖回去 |
 | `version` | 改了产物就一并改它（`docs/UPDATE.md` §4.3） |
@@ -383,9 +382,11 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 1. ~~**脚本更新机制**~~ —— ✅ **已实施**（2026-10-09），见 **`docs/UPDATE.md`**
    （⚠️ 不是 `DESIGN.md` §3.4，那一节已被取代）。
+   **形态**：更新逻辑在**工作流脚本**（`src/bootstrap.js`）里 ——
+   导入工作流 + 跑一次即自足（缺产物自动下载全套）。
    ⚠️ **真机验证未做**（设备不可达）：`/sdcard` 上 `renameTo` 的原子性、
-   `vflow.network.http_request` 的 JS 桥接、`eval(update.js)` 能否读到主脚本全局 ——
-   这三项**必须在真机上确认**（该文档 §10 六项）
+   `vflow.network.http_request` 的 JS 桥接、**bootstrap 里 eval 主脚本后主脚本能否
+   看到 bootstrap 的全局** —— 这三项**必须在真机上确认**（该文档 §10 六项）
 2. QQ / 微信触发源（`vflow.trigger.activity_changed` + `class_filter`）
 3. 附加插件（`com.nyehueh.fluidcloud`）是否继续用
 4. ~~补 vFlow 的 `ContextFactory.createClassLoader`~~ —— **不再是阻塞项**：

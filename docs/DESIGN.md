@@ -239,9 +239,10 @@ var factTag = (typeof inputs !== "undefined" && inputs.fact_tag) ? String(inputs
 > ⚠️⚠️ **本节已被 [`docs/UPDATE.md`](UPDATE.md) 取代，且该方案已落地。**
 > **以 UPDATE.md 为准** —— 那一份把「谁定的决策」逐条标了来源。
 >
-> 实施落点：`src/update.js`（新建的独立更新器）/ `src/core.js`（「检查更新」菜单项
-> + 顶层分派里的「读 + eval」）/ `src/adapter.js`（config 版本闸 + 增量合并、
-> `ensureRules` 改 `exists()`+`length()`）/ `src/generate.js`（第二输出 `dist/update.js`）。
+> 实施落点：`src/bootstrap.js`（**更新逻辑在这里** —— 首次自足 + 拉取/合并/原子写；
+> 2026-10-09 从独立文件搬进来的，见 UPDATE.md §7）/ `src/core.js`（「检查更新」菜单项
+> + 顶层分派里调 `vflowUpdateRun()`）/ `src/adapter.js`（config 版本闸 + 增量合并、
+> `ensureRules` 改 `exists()`+`length()`）。
 >
 > ⚠️ **本节以下内容（§3.4.2–§3.4.7）里的旧决策多半已推翻**，
 > **请勿直接引用** —— 先看 UPDATE.md 的 §1「决策来源」表。逐条状态：
@@ -255,7 +256,7 @@ var factTag = (typeof inputs !== "undefined" && inputs.fact_tag) ? String(inputs
 | §3.4.3 源选型 | ❌ **已推翻** —— 只走 GitHub 官方 raw，`dist/` 入库 |
 | §3.4.4 版本号对比 | ✅ 仍成立（且现在**同时是闸**） |
 | §3.4.5 手动触发器 + 标签 | ✅ 已于 2026-10-08 实施（标签 `设置`） |
-| §3.4.6 「更新不进脚本、走工作流模块」 | ❌ **已推翻** —— updater 是**独立文件**，由设置菜单直接调 |
+| §3.4.6 「更新不进脚本、走工作流模块」 | ❌ **已推翻** —— 更新逻辑在**工作流脚本**（`src/bootstrap.js`）里，由设置菜单直接调；2026-10-09 曾一度做成独立文件 `update.js`，同日又搬回脚本（「导入即自足」，见 UPDATE.md §7.0） |
 | §3.4.7 静默失效点清单 | ✅ 仍成立（已逐条落实，见 UPDATE.md §8） |
 
 > ⚠️ **本节写于 2026-10-07 的原始状态是「只写文档，不写实现」** ——
@@ -1350,7 +1351,7 @@ if (!cancelCurrent) {
 | # | 事项 | 说明 |
 |---|---|---|
 | 11 | 图形化设置页 | ⚠️ **入口已接上（2026-10-08，见 §3.4.5）**，但**界面本身仍是上游原样的自绘 `WindowManager` View**（`showsettingsui` / `showFileEditorUI`）。⇒ 这一步剩下的只有「换成 `vflow.ui.activity.*` UI 积木」，**工作量不小**，且**不紧急**（自绘的那三个界面能用）。⚠️ 代价：它们**阻塞**（`while (result === null)`）且 `catch` 吞异常 |
-| 12 | **脚本更新机制**（拉产物 / 覆盖 / 版本号） | ✅ **已实现**（2026-10-09，见 [`docs/UPDATE.md`](UPDATE.md)）。⚠️ **不移植上游 `update.js`** —— `src/update.js` 是**新写的独立更新器**（脚本整份覆盖、规则/配置增量合并） |
+| 12 | **脚本更新机制**（拉产物 / 覆盖 / 版本号） | ✅ **已实现**（2026-10-09，见 [`docs/UPDATE.md`](UPDATE.md)）。⚠️ **不移植上游 `update.js`** —— 更新逻辑是**新写的**，且**放在工作流脚本** `src/bootstrap.js` 里（导入工作流 + 跑一次即自足；脚本整份覆盖、规则/配置增量合并） |
 | 13 | （可选）岛通知模块化 | §4.1 路线 B：新增 `vflow.notification.island`，**并把脚本里那份删掉** |
 
 ---
