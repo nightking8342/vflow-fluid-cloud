@@ -11,13 +11,18 @@
 它由用户在 vFlow 里「导出工作流」得到，此后**以文件为准**：
 要改脚本 / 触发器 / 卡片样式，都改这份 JSON，再导入回设备（`tools/deploy-workflow.py`）。
 
-其中**只有两个键是派生的**，其余（名字 / 描述 / 卡片颜色 / 触发器 / 标签）是
-**人维护**的 —— 本脚本只刷这两个，**不碰其它任何字节**：
+其中**只有三个键是派生的**，其余（名字 / 描述 / 卡片颜色 / 标签 / 各种开关）是
+**人维护**的 —— 本脚本只刷这三个，**不碰其它任何字节**：
 
 | 键 | 来源 |
 |---|---|
 | `steps[0].parameters.script` | `src/bootstrap.js` 全文 |
 | `steps[0].parameters.inputs` | 下面的 `INPUTS` 常量 |
+| `triggers` | 下面的 `TRIGGERS` 常量 |
+
+⚠️ `triggers` 是**2026-10-08 新增**的派生键（此前是纯人维护）。改它的理由：
+`inputs` 里 `{{<triggerId>.output}}` 引用的 id 与 `triggers[].id` 是**同一组字面量**，
+两边各写一份必然漂移，而漂移的表现是**静默**的（脚本拿到 `{{{...}}}`，当空处理）。
 
 ⚠️ **为什么必须自动刷，不能手改**：`bootstrap.js` 改了却忘了同步 JSON，
 表现是「导入之后设备上跑的还是旧脚本」—— **两边都看不出来**。
@@ -80,6 +85,57 @@ INPUTS = {
     "clipboard_text": "{{fluid_trigger_clipboard.text_content}}",
     "trigger_label": "{{vars.__trigger_label}}",
 }
+
+# `triggers` —— 三个触发器，**顺序与 id 都固定**（`inputs` 引用它们的 id）。
+#
+# | # | 模块 | 标签 | 作用 |
+# |---|---|---|---|
+# | 1 | `vflow.trigger.clipboard` | `剪切板` | 复制分享文案 → 识别链接 |
+# | 2 | `vflow.trigger.broadcast` | `点击` | 岛/浮窗按钮的回传（§4.6 出路 ①） |
+# | 3 | `vflow.trigger.manual` | `设置` | **手动跑 → 弹「设置指令 / 编辑规则」界面** |
+#
+# ⚠️⚠️ **手动触发器必须是「触发器」，不能是「步骤」。** 在 vFlow 里手动执行时，
+#    `triggerStepId = workflow.manualTrigger()?.id`（`HomeScreen.kt:596` 等 6 处），
+#    而 `TriggerLabel.labelFor` 只在 `workflow.triggers` 里找那个 id
+#    ⇒ 写成步骤的话 `[[__trigger_label]]` 恒为**空串**，core.js 拿不到「设置」，
+#    表现是「点了执行，什么都没发生」（**静默**）。
+#
+# ⚠️⚠️ **代价（如实记录）**：加上它之后 `hasAutoTriggers()` 变 true ⇒ 卡片上那个
+#    「▶ 执行」按钮**会消失**（`WorkflowListScreen.kt:943`：`isManualTrigger && !hasAutoTriggers`），
+#    而「5秒后执行」挂在同一个按钮的长按上。⇒ 改用**桌面快捷方式**触发
+#    （⋮ 菜单 →「添加到桌面」，判据是 `hasManualTrigger()`，本改动后可用）。
+#
+# ⚠️ 标签 `设置` 与 `src/core.js` 的 `VFLOW_MANUAL_LABEL` **必须逐字一致**。
+TRIGGERS = [
+    {
+        "id": "fluid_trigger_clipboard",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.clipboard",
+        "parameters": {"mode": "core", "__trigger_label": "剪切板"},
+    },
+    {
+        "id": "fluid_click_broadcast",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.broadcast",
+        "parameters": {
+            "actions": ["com.chaomixian.vflow.fluidcloud.CLICK"],
+            "data_schemes": ["vflowfc"],
+            "categories": [],
+            "match_mode": "exact",
+            "cooldown_ms": 0.0,
+            "__trigger_label": "点击",
+        },
+    },
+    {
+        "id": "fluid_trigger_manual",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.manual",
+        "parameters": {"__trigger_label": "设置"},
+    },
+]
 
 # Gson 的 HTML-safe 转义集合（`JsonWriter.HTML_SAFE_REPLACEMENT_CHARS`）。
 HTML_SAFE = "<>&='"
@@ -160,9 +216,16 @@ def main():
         #    （click_uri / clipboard_text / trigger_label），故不会打乱。
         params["inputs"] = dict(INPUTS)
 
+    if doc.get("triggers") != TRIGGERS:
+        changes.append("triggers：%s → %s"
+                       % (json.dumps([t.get("moduleId") for t in doc.get("triggers") or []],
+                                     ensure_ascii=False),
+                          json.dumps([t["moduleId"] for t in TRIGGERS], ensure_ascii=False)))
+        doc["triggers"] = [dict(t) for t in TRIGGERS]
+
     if not changes:
-        print("✓ %s 已是最新（script %d 字符、inputs %d 键）"
-              % (WORKFLOW.name, len(script), len(INPUTS)))
+        print("✓ %s 已是最新（script %d 字符、inputs %d 键、triggers %d 个）"
+              % (WORKFLOW.name, len(script), len(INPUTS), len(TRIGGERS)))
         return
 
     if args.check:

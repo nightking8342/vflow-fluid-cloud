@@ -116,28 +116,33 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ```
 ├── version               # 本项目版本号（与设备上那份对比用，见 docs/DESIGN.md §3.4.4）
 ├── docs/DESIGN.md        # ⭐ 设计与可行性分析（含真机验证记录、踩坑、未决项）
+├── docs/UPDATE.md        # ⭐ **脚本更新机制方案**（✅ **已实施** 2026-10-09；取代 DESIGN.md §3.4；
+│                         #   标了每条决策的来源 + §10 真机待核实项）
 ├── reference/            # 上游素材**完整镜像**（只读，不进构建，勿改）
 │   ├── README.md         #   ⚠️ 本文件是**本项目加的**（说明哪些移植了、为什么）
 │   ├── core.js           #   上游核心 2810 行 ⇒ 已移植到 src/core.js
 │   ├── rules/            #   27 条有链接规则 ⇒ 已移植到 src/rules/
 │   ├── nolinkrules/      #   2 条无链接规则 ⇒ 已移植到 src/nolinkrules/
 │   ├── onOpen.js         #   223 行，指令启用时执行 ⇒ **未移植**（无对应时机）
-│   ├── update.js         #   647 行，远程更新 ⇒ **未移植**（被 §3.4 那套取代）
+│   ├── update.js         #   647 行，远程更新 ⇒ **未移植**（被 docs/UPDATE.md 那套取代；
+│   │                     #   ⚠️ 但**留着**作对照 —— src/update.js 的「合并语义」是从它推出来的）
 │   ├── ShortX-流体云组件3.7_超级岛版_.txt  # ⚠️ **不是上游源码** —— ShortX 规则分享文件，
 │   │                     #   记录「上游在 ShortX 侧怎么接线」（别处没有）
 │   └── version           #   `3.2.3`（⚠️ 与根目录的 version **不是一回事**）
 ├── src/                  # ✍️ 手写（我们维护的就是这些）
 │   ├── adapter.js        #   平台桥 VFLOW_ADAPTER + 全局变量 + 首次自举
 │   ├── core.js           #   ★ 核心逻辑（从上游移植后**就地维护**，直接改）
+│   ├── update.js         #   ⭐ **更新器**（独立文件，不进主脚本；**已实施**，见 docs/UPDATE.md）
 │   ├── bundle-rules.js   #   合并 src/rules/*.json → dist/rules.json
-│   ├── generate.js       #   adapter + core → dist/vflow-fluid-cloud.js
+│   ├── generate.js       #   adapter + core → dist/vflow-fluid-cloud.js（+ update.js 独立输出）
 │   ├── bootstrap.js      #   引导脚本**本身**（静态文件，不是生成器）
 │   ├── rules/            #   27 个有链接规则（一文件一条）
 │   └── nolinkrules/      #   2 个无链接规则
 ├── workflow/             # 📄 工作流产物
 │   └── fluid-cloud.json  #   ★ 在 vFlow 里**导入**它就建好工作流（字段完整）
-├── dist/                 # 🔨 构建产物（不入库）
-│   ├── vflow-fluid-cloud.js   # ★ 完整脚本（113 KB）→ push 到设备
+├── dist/                 # 🔨 构建产物（⚠️ **已入库**，见 docs/UPDATE.md §2.1）
+│   ├── vflow-fluid-cloud.js   # ★ 完整脚本（128 KB，adapter + core，**不含 updater**）→ push 到设备
+│   ├── update.js              # ★ 更新器（独立）→ push 到设备（⚠️ **更新流程不更新它**）
 │   ├── rules.json / nolinkrules.json  # ★ 规则库 → push 到设备
 ├── test/                 # 离线测试（Node 模拟 Rhino + Android）
 └── tools/                # 刷新工作流产物 / 推送到设备 / 跑一次取日志
@@ -150,7 +155,7 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ```bash
 npm run build          # 两步全跑：合并规则 → 拼接脚本
 npm run build:workflow # bootstrap.js → workflow/fluid-cloud.json（改了它才要跑）
-npm test               # 离线测试（71 例）
+npm test               # 离线测试（104 例）
 npm run check          # build + 语法检查 + test
 
 # 单独跑某一步（改了什么跑什么）
@@ -179,7 +184,11 @@ adb push dist/nolinkrules.json /sdcard/vFlow/fluid-cloud/
 # 2. 完整脚本（⚠️ 每次改了脚本都要重推）
 adb push dist/vflow-fluid-cloud.js /sdcard/vFlow/fluid-cloud/
 
-# 3. 版本号（给将来的更新机制用，见 docs/DESIGN.md §3.4.4）
+# 2b. 更新器（⚠️ **独立文件** —— 只在它自己改了时才推。
+#     更新流程**不会**更新它，所以它的改动只能这样手工推，见 docs/UPDATE.md §7.3）
+adb push dist/update.js        /sdcard/vFlow/fluid-cloud/
+
+# 3. 版本号（给更新机制用，见 docs/UPDATE.md §4.3）
 adb push version /sdcard/vFlow/fluid-cloud/version
 
 # 4. 工作流 —— ⭐ 走**导入**，不走 API（建一次，之后改脚本不用动它）
@@ -210,6 +219,7 @@ python tools/deploy-workflow.py            # 刷新 JSON → 推到设备 → �
 vFlow 工作流（workflow/fluid-cloud.json，导入即得）
   ├── 触发器 ① vflow.trigger.clipboard（标签「剪切板」）
   ├── 触发器 ② vflow.trigger.broadcast（标签「点击」，action …CLICK / scheme vflowfc）
+  ├── 触发器 ③ vflow.trigger.manual（标签「设置」）→ 弹上游那三个自绘界面
   └── 步骤 vflow.system.js
         ├── script = src/bootstrap.js 的内容（约 2 KB）
         │     └─ eval(读 /sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js)
@@ -220,10 +230,15 @@ vFlow 工作流（workflow/fluid-cloud.json，导入即得）
                        trigger_label:  "{{vars.__trigger_label}}" }
 ```
 
-> ⚠️ 两条触发路跑的是**同一份脚本**，脚本内部靠 `parseClickPayload(input)` 顶层分派。
-> 一次执行里**必然有一路的输出是未命中的**，而 vFlow 对未命中**不给空串**、
+> ⚠️ 三条触发路跑的是**同一份脚本**，脚本内部靠 `input` / `tiggerTag` 顶层分派
+> （`vflowfc://click?…` → 打开；标签 `设置` → 设置界面；其余 → 识别链路）。
+> 一次执行里**必然有未命中的输出**，而 vFlow 对未命中**不给空串**、
 > 给字面量 `{{{stepId.outputId}}}`（三个花括号）⇒ `adapter.js` 的 `input` 必须认出来当空。
 > 详见 §「脚本侧的高频陷阱」第 7 条。
+>
+> ⚠️ 触发器 ③ 是 2026-10-08 加的（手动跑 → 设置界面，`docs/DESIGN.md` §3.4.5）。
+> 加它之后**卡片上的「▶ 执行」按钮会消失**（vFlow 只在「有手动触发器**且没有**自动触发器」
+> 时才画它）⇒ 手动跑改用桌面快捷方式（⋮ →「添加到桌面」）。
 
 ### 移植时的 5 类改动（**一次性，已落进 `src/core.js`**）
 
@@ -333,15 +348,25 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 | 改了什么 | 要做什么 |
 |---|---|
 | `src/adapter.js` / `src/core.js` | `npm run check` + **重新 `adb push` 完整脚本** |
+| `src/update.js` | `npm run check` + **重新 `adb push` `dist/update.js`**（⚠️ **更新流程不会更新它**，见 `docs/UPDATE.md` §7.3） |
 | `src/rules/` / `src/nolinkrules/` | `npm run check` + 重新 push **两个 JSON** |
 | `src/bootstrap.js` | `npm run check` + `npm run build:workflow` + **导入工作流**（`tools/deploy-workflow.py`） |
-| `workflow/fluid-cloud.json`（改触发器 / 颜色 / 描述） | **导入工作流**（`tools/deploy-workflow.py --no-build`） |
-| `version` | 改了产物就一并改它（§3.4.4） |
+| `workflow/fluid-cloud.json`（改颜色 / 描述 / 各种开关） | **导入工作流**（`tools/deploy-workflow.py --no-build`） |
+| ⚠️ **触发器**（`triggers` 现在是**派生**的，见 `tools/build-workflow.py` 的 `TRIGGERS`） | 改 `build-workflow.py` → `python tools/build-workflow.py` → **导入工作流**。⚠️ **不要直接手改 JSON 里的 `triggers`** —— 下次刷新会被覆盖回去 |
+| `version` | 改了产物就一并改它（`docs/UPDATE.md` §4.3） |
+| ⚠️ `dist/` | **`npm run build` 之后要一起提交**（已入库）—— 否则仓库里是旧产物，两边都看不出来 |
 | ⚠️ `reference/` | **一律不改** —— 那是来历记录，改了就失去对照价值 |
 
-> ⚠️ **改了 `src/` 里的任何东西，产物都要重新 push。** `dist/` 不入库，
-> 设备上跑的是 `/sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js`，
-> **不 push 就等于没改**（而 App 侧完全看不出来）。
+> ⚠️ **改了 `src/` 里的任何东西，产物都要重新 push。** 设备上跑的是
+> `/sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js`，**不 push 就等于没改**
+> （而 App 侧完全看不出来）。
+>
+> ⚠️⚠️ **`dist/` 已入库**（2026-10-09，`docs/UPDATE.md` §2.1）—— 所以还有**第二条**要求：
+> **`npm run build` 之后要把 `dist/` 一起提交**。否则仓库里的产物是旧的，
+> 用户更新到旧脚本，而**两边都看不出来**。
+> ⇒ 有断言兜底：`test/run.js` 的 `[13]` 节把 `dist/` 与「当场重跑一次 `generate` 的输出」
+> **逐字节**比（该文档 §8 第 6 条）。⚠️ 局限：`npm run check` 是「先 build 再 test」，
+> 所以在 `check` 这条流程下它**恒绿** —— 价值在于**单独跑 `npm test`**。
 
 **测试能覆盖什么**：`test/` 用 Node 模拟 Rhino + Android，**只覆盖纯 JS 那一半**
 （规则匹配 / 链接识别 / 岛参数 JSON / 平台桥调用）。
@@ -356,8 +381,11 @@ ShortX 用 `com.faendir:rhino-android` 覆写了这一层（`.class` → `dx` �
 
 ## 未决项（优先看 `docs/DESIGN.md` §7）
 
-1. **脚本更新机制**（拉产物 / 不走代理 / 覆盖 + 版本号对比）——
-   **方案已定案，未实现**，见 `docs/DESIGN.md` §3.4
+1. ~~**脚本更新机制**~~ —— ✅ **已实施**（2026-10-09），见 **`docs/UPDATE.md`**
+   （⚠️ 不是 `DESIGN.md` §3.4，那一节已被取代）。
+   ⚠️ **真机验证未做**（设备不可达）：`/sdcard` 上 `renameTo` 的原子性、
+   `vflow.network.http_request` 的 JS 桥接、`eval(update.js)` 能否读到主脚本全局 ——
+   这三项**必须在真机上确认**（该文档 §10 六项）
 2. QQ / 微信触发源（`vflow.trigger.activity_changed` + `class_filter`）
 3. 附加插件（`com.nyehueh.fluidcloud`）是否继续用
 4. ~~补 vFlow 的 `ContextFactory.createClassLoader`~~ —— **不再是阻塞项**：

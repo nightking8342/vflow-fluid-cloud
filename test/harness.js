@@ -47,12 +47,46 @@ const calls = {
     // 每次 `PendingIntent.getActivity/getBroadcast` 记一条
     // （2026-10-07 起 `requestCode` 是契约的一部分，必须能断言）
     pending: [],
-    log: []
+    log: [],
+    // 自绘 UI（`showsettingsui` / `showFileEditorUI` / `showOptionsDialog`）里
+    // 每个 `TextView.setText` 的文本，按出现顺序。
+    // ⚠️ 它是**离线验证「弹的是哪个界面」的唯一手段** —— 那几个界面全走
+    //    `WindowManager.addView`，没有任何返回值、也没有日志。
+    uiText: [],
+    // 每次 `WindowManager.addView` 记一条 `{ view, params }`
+    uiRoots: []
 };
 
 function resetCalls() {
     for (const k of Object.keys(calls)) calls[k] = [];
+    uiListenerBox.list = [];
+    // ⚠️ 只清**请求记录**，**不清 `responses`** —— 用例要先配好响应再 run()，
+    //    清了就没法配了（run() 内部会调 resetCalls）。
+    httpBox.requests = [];
 }
+
+/**
+ * HTTP 模块的假实现（`vflow.network.http_request`）。
+ *
+ * ⚠️ 默认**未配置的 url 返回 404**（不是 200）—— 逼用例**显式**配响应。
+ *    若默认给 200，那「忘了配」就会静默变成「拉到了空内容」，用例通过但什么也没测。
+ *    HTTP 模块**对 404 不抛异常**（任何状态码都 Success，见 UPDATE.md §5.5），
+ *    所以这条默认值正好能测出「实现有没有自己判 status_code」。
+ *
+ * `responses[url]` 可以是对象（浅合并到默认 200 响应上）或函数（拿到 args，返回响应）。
+ */
+const httpBox = { requests: [], responses: {} };
+
+/**
+ * 自绘界面里注册过的点击监听器，**按注册顺序**。
+ *
+ * ⚠️ 为什么必须记：`showOptionsDialog` / `showsettingsui` / `showFileEditorUI` 三个界面
+ *    是**阻塞轮询**等用户点击的（`while (result === null) { Thread.sleep(150); }`）。
+ *    离线测试里没人点 ⇒ 那个循环**永远出不来**，撞上 `Thread.sleep` 的保险后报
+ *    「等待循环转了 10 万次仍未退出」—— 那是**环境**问题，不是脚本问题。
+ *    ⇒ 测试里用 `autoDismiss` 模拟「用户点了最后那个按钮」（见 `addView`）。
+ */
+const uiListenerBox = { list: [] };
 
 /**
  * `Thread.sleep` 自旋计数器。
@@ -96,6 +130,39 @@ function anyObject(name, overrides) {
 /** 造一个可当作「Java 对象」用的普通 JS 对象（值可读、方法可调）。 */
 function javaLike(props) {
     return Object.assign({}, props);
+}
+
+/**
+ * 「宽进」的 View stub 工厂。
+ *
+ * ⚠️ **为什么不用手写方法清单**：自绘界面（`showsettingsui` / `showFileEditorUI` /
+ *    `showOptionsDialog`）动用的 View API 有几十个（`setBackgroundColor` / `setTypeface` /
+ *    `setLayoutParams` / `setFillViewport` …），手写清单会变成**打地鼠** ——
+ *    漏一个就抛 `TypeError: xxx is not a function`，而那几个界面的 `catch` 是
+ *    **吞异常**的（上游原样）⇒ 表现是「界面静默弹不出来」，排查成本极高（实际踩过）。
+ *
+ * ⇒ 这里让**未知成员一律返回一个万能 stub**（`anyObject`，可调用、可赋值、可继续取属性），
+ *    与 `anyObject` 的「宽进」原则一致。`overrides` 里放需要**真实现**的那几个
+ *    （`setText` 要记进 `calls.uiText`；`setOnClickListener` 要记进 `uiListenerBox`）。
+ *
+ * @param {object} [overrides] 需要真实现的方法（`this` 绑到实例）。
+ */
+function looseViewClass(overrides) {
+    return class {
+        constructor() {
+            const self = this;
+            return new Proxy(this, {
+                get(target, prop) {
+                    if (typeof prop === 'symbol') return Reflect.get(target, prop);
+                    if (overrides && Object.prototype.hasOwnProperty.call(overrides, prop)) {
+                        return overrides[prop].bind(self);
+                    }
+                    if (prop in target) return Reflect.get(target, prop);
+                    return anyObject(`View.${String(prop)}`);
+                }
+            });
+        }
+    };
 }
 
 /**
@@ -159,6 +226,11 @@ function installRhinoGlobals(sandbox, scriptText) {
         Button: 'android.widget.Button',
         ScrollView: 'android.widget.ScrollView',
         EditText: 'android.widget.EditText',
+        FrameLayout: 'android.widget.FrameLayout',
+        ImageView: 'android.widget.ImageView',
+        // ⚠️ `View` 是 `importPackage(android.view)` 带进来的短名 ——
+        //    core.js 里 6 处 `new View.OnClickListener({…})` 全靠它。
+        View: 'android.view.View',
         Intent: 'android.content.Intent',
         IntentFilter: 'android.content.IntentFilter',
         BroadcastReceiver: 'android.content.BroadcastReceiver',
@@ -221,6 +293,14 @@ function installJava(sandbox) {
         constructor(p) { this.raw = String(p); this.path = mapPath(p); }
         exists() { return fs.existsSync(this.path); }
         isDirectory() { try { return fs.statSync(this.path).isDirectory(); } catch { return false; } }
+        // ⚠️ `length()` 是 `ensureRules()` 的新判据的一部分（exists() + length() > 0，
+        //    见 UPDATE.md §5.4）—— 文件不存在时返回 0（与真 Java 一致）。
+        length() { try { return fs.statSync(this.path).size; } catch { return 0; } }
+        // ⚠️ **必须真实现**（不能 no-op）—— 更新器的原子写靠它（UPDATE.md §5.3）。
+        //    no-op 的话「renameTo 之后目标有没有被换成新内容」永远看不出来。
+        renameTo(other) {
+            try { fs.renameSync(this.path, other.path); return true; } catch { return false; }
+        }
         getAbsolutePath() { return this.raw; }
         getName() { return path.basename(this.path); }
         getParentFile() { return new JFile(path.dirname(this.raw)); }
@@ -474,11 +554,40 @@ function installAndroid(sandbox, opts) {
         cancel(id) { calls.cancelNotification.push(id); }
     };
 
+    /**
+     * ⚠️ `addView` **必须真实现** —— 自绘界面（`showsettingsui` / `showFileEditorUI`）
+     *    全靠它。no-op 的话那些界面在离线测试里与「没弹」**不可区分**。
+     */
+    const windowManager = {
+        getDefaultDisplay: () => ({ getMetrics() {}, getRealSize() {}, getRotation: () => 0 }),
+        addView(view, params) {
+            calls.uiRoots.push({ view, params });
+            // ⚠️ **自动点掉**：自绘界面在 `while (result === null)` 里等用户点击，
+            //    离线测试里没人点 ⇒ 死转（撞 `Thread.sleep` 的保险后报「等待循环转了
+            //    10 万次仍未退出」，看着像脚本坏了，其实是没人点）。
+            //    这里同步「点」最后一个注册的监听器（= 「确定」/「取消」，都是**收尾**
+            //    那个按钮），让循环能退出。
+            //    ⇒ 代价：**测不到「点了中间某个按钮会怎样」**（那需要人点或更细的驱动）。
+            if (uiListenerBox.autoDismiss && uiListenerBox.list.length) {
+                // 默认点**最后一个**（「取消」/「确定」这类收尾按钮）。
+                // `__androidOpts.autoDismissIndex` 可指定点第几个 —— 用它测
+                // 「点了「设置指令」会弹出设置界面」这条链路。
+                const idx = uiListenerBox.autoDismissIndex < 0
+                    ? uiListenerBox.list.length - 1
+                    : uiListenerBox.autoDismissIndex;
+                const l = uiListenerBox.list[idx];
+                if (l && typeof l.onClick === 'function') l.onClick();
+            }
+        },
+        removeView() {},
+        updateViewLayout() {}
+    };
+
     const context = {
         getSystemService(name) {
             const n = String(name);
             if (n === 'notification' || n === 'notification_service') return notificationManager;
-            if (n === 'window') return { getDefaultDisplay: () => ({ getMetrics() {}, getRealSize() {}, getRotation: () => 0 }) };
+            if (n === 'window') return windowManager;
             if (n === 'activity' || n === 'activity_service') {
                 // ⚠️ 必须返回 **Java List**（有 `.size()`），不是 JS 数组 ——
                 //    core.js 写的是 `for (var i = 0; i < runningAppProcesses.size(); i++)`，
@@ -497,6 +606,14 @@ function installAndroid(sandbox, opts) {
         //    返回一个万能 stub 的话「有没有设对包名」测不出来。
         getPackageName: () => 'com.chaomixian.vflow',
         createPackageContextAsUser: () => ({ getPackageManager: () => packageManager }),
+        // ⚠️ `showsettingsui` / `showOptionsDialog` 要读夜间模式与屏幕尺寸
+        //    （`getResources().getConfiguration().uiMode` / `getDisplayMetrics()`），
+        //    `showFileEditorUI` 还要 `getDisplayMetrics().density`（dip2px）。
+        //    不给的话那三个界面在离线测试里直接抛，测不到「弹的是哪一个」。
+        getResources: () => ({
+            getConfiguration: () => ({ uiMode: 0 }),
+            getDisplayMetrics: () => displayMetrics()
+        }),
         startActivity(i) { calls.startActivity.push(i); },
         startActivityAsUser(i) { calls.startActivity.push(i); },
         registerReceiver() {},
@@ -551,6 +668,8 @@ function installAndroid(sandbox, opts) {
                 parseUri: () => intent('android.intent.action.VIEW', null)
             }),
             IntentFilter: class { addAction() { return this; } },
+            // ⚠️ 路径是 `android.content.res.Configuration`（core.js 写的是全路径）
+            res: { Configuration: { UI_MODE_NIGHT_MASK: 0x30, UI_MODE_NIGHT_YES: 0x20 } },
             BroadcastReceiver: class { constructor(o) { Object.assign(this, o); } },
             pm: {
                 PackageManager: { MATCH_DEFAULT_ONLY: 65536, MATCH_ALL: 131072, GET_META_DATA: 128 },
@@ -626,30 +745,89 @@ function installAndroid(sandbox, opts) {
             Parcel: {}
         },
         view: {
-            WindowManager: { LayoutParams: class { constructor(...a) { Object.assign(this, { args: a }); } } },
+            WindowManager: {
+                // ⚠️ `WRAP_CONTENT` / `MATCH_PARENT` 是**静态常量**（core.js 直接取用）
+                LayoutParams: class { constructor(...a) { Object.assign(this, { args: a }); } static WRAP_CONTENT = -2; static MATCH_PARENT = -1; }
+            },
             Gravity: { TOP: 0x30, BOTTOM: 0x50, CENTER: 0x11, LEFT: 0x03 },
             Surface: { ROTATION_0: 0, ROTATION_180: 2 },
             MotionEvent: {},
-            View: class { setOnClickListener() {} setOnTouchListener() {} },
+            // ⚠️ 嵌套接口必须挂在 `View` 上 —— core.js 写的是 `new View.OnClickListener({…})`，
+            //    这是**接口**（Rhino 里走 Proxy 实现，不是子类化；见 DESIGN.md §4.6）。
+            //    离线侧只需一个「接住对象」的壳。
+            View: Object.assign(
+                class { setOnClickListener() {} setOnTouchListener() {} setBackgroundDrawable() {} setBackground() {} setEnabled() {} setText() {} setVisibility() {} setPadding() {} setLayoutParams() {} },
+                {
+                    OnClickListener: class { constructor(o) { if (o) Object.assign(this, o); } },
+                    OnTouchListener: class { constructor(o) { if (o) Object.assign(this, o); } }
+                }
+            ),
             ViewGroup: class {}
         },
         widget: {
-            LinearLayout: class { constructor() {} setOrientation() {} addView() {} setPadding() {} setBackground() {} setGravity() {} setLayoutParams() {} },
-            TextView: class { constructor() {} setText() {} setTextSize() {} setTextColor() {} setGravity() {} setPadding() {} },
-            Button: class { constructor() {} setText() {} setEnabled() {} setBackgroundDrawable() {} setOnClickListener() {} },
-            ScrollView: class { constructor() {} addView() {} setLayoutParams() {} },
-            EditText: class { constructor() {} setText() {} getText() { return ''; } requestFocus() {} }
+            // ⚠️ 这几个 View stub 里**只有 `setText` 是真实现**（记进 `calls.uiText`）——
+            //    它是离线验证「自绘界面弹出来了、弹的是哪一个」的唯一手段。
+            //    其余（addView / setPadding …）保持 no-op：它们不影响可断言的行为。
+            // ⚠️ 这几个 View stub 走 `looseViewClass`（未知方法一律宽进）——
+            //    自绘界面动用的 View API 太多，手写清单必然漏（漏一个就抛，
+            //    而那几个界面的 catch 是吞异常的 ⇒ 界面静默弹不出来）。
+            //    这里只列**需要真实现**的方法：
+            //      `setText` → 记进 `calls.uiText`（离线验证「弹的是哪个界面」的唯一手段）
+            //      `setOnClickListener` → 记进 `uiListenerBox`（自动点掉阻塞的界面）
+            LinearLayout: Object.assign(
+                looseViewClass({
+                    setText(t) { calls.uiText.push(String(t)); },
+                    setOnClickListener(l) { uiListenerBox.list.push(l); }
+                }),
+                {
+                    // `LinearLayout.LayoutParams` 是**嵌套静态类**，core.js 里用得很密
+                    // （`new LinearLayout.LayoutParams(0, -2, 1)` + `setMargins`）。
+                    // 不挂上去的话 `showsettingsui` 会抛 `is not a constructor`。
+                    LayoutParams: class { constructor() {} setMargins() {} static MATCH_PARENT = -1; static WRAP_CONTENT = -2; }
+                }
+            ),
+            FrameLayout: Object.assign(
+                looseViewClass({
+                    setText(t) { calls.uiText.push(String(t)); },
+                    setOnClickListener(l) { uiListenerBox.list.push(l); }
+                }),
+                { LayoutParams: class { constructor() {} static MATCH_PARENT = -1; static WRAP_CONTENT = -2; } }
+            ),
+            ScrollView: Object.assign(
+                looseViewClass({
+                    setText(t) { calls.uiText.push(String(t)); },
+                    // `post` 同步跑 —— 自绘界面用它做「量完尺寸再调」与「去掉 FLAG_NOT_FOCUSABLE」
+                    post(r) { if (r && r.run) r.run(); }
+                }),
+                { LayoutParams: class { constructor() {} static MATCH_PARENT = -1; static WRAP_CONTENT = -2; } }
+            ),
+            TextView: looseViewClass({
+                setText(t) { calls.uiText.push(String(t)); },
+                setOnClickListener(l) { uiListenerBox.list.push(l); }
+            }),
+            Button: looseViewClass({
+                setText(t) { calls.uiText.push(String(t)); },
+                setOnClickListener(l) { uiListenerBox.list.push(l); }
+            }),
+            EditText: looseViewClass({
+                setText(t) { calls.uiText.push(String(t)); },
+                setOnClickListener(l) { uiListenerBox.list.push(l); },
+                getText() { return ''; }
+            }),
+            ImageView: looseViewClass({})
         },
         graphics: {
             Color: { WHITE: -1, BLACK: -16777216, DKGRAY: -12303292, TRANSPARENT: 0, parseColor: () => 0 },
-            GradientDrawable: class { setColor() {} setCornerRadius() {} },
+            GradientDrawable: class { setColor() {} setCornerRadius() {} setStroke() {} },
             PixelFormat: { TRANSLUCENT: -3 },
             Bitmap: { createBitmap: () => ({ isRecycled: () => false, getWidth: () => 1, getHeight: () => 1 }), Config: { ARGB_8888: 1 } },
             Canvas: class { constructor() {} getWidth() { return 1; } getHeight() { return 1; } },
             Rect: class { constructor(l, t, r, b) { this.left = l; this.top = t; this.right = r; this.bottom = b; } },
+            // `showsettingsui` / `showOptionsDialog` 用 `Typeface.BOLD` 给标题加粗
+            Typeface: { BOLD: 1, NORMAL: 0 },
             Point: class { constructor() { this.x = 0; this.y = 0; } },
             drawable: {
-                GradientDrawable: class { setColor() {} setCornerRadius() {} },
+                GradientDrawable: class { setColor() {} setCornerRadius() {} setStroke() {} },
                 BitmapDrawable: class {},
                 Icon: { createWithBitmap: () => ({ __icon: 'bitmap' }) }
             },
@@ -679,6 +857,25 @@ function installVFlow(sandbox) {
                 calls.shell.push(args && args.command);
                 return { result: '', success: true, exit_code: 0 };
             }
+        },
+        network: {
+            // ⚠️ 返回结构照 `JsExecutor.kt:363-372`（Success 时把 outputs Map 转成 JS 对象）
+            //    + `HttpRequestModule.kt` 的输出 id：`response_body` / `status_code`。
+            http_request: (args) => {
+                const url = args && args.url;
+                httpBox.requests.push(args);
+                const configured = Object.prototype.hasOwnProperty.call(httpBox.responses, url)
+                    ? httpBox.responses[url]
+                    : null;
+                let resp;
+                if (typeof configured === 'function') resp = configured(args);
+                else if (configured) resp = configured;
+                else resp = { response_body: '', status_code: 404 }; // 默认 404（见 httpBox 注释）
+                return {
+                    response_body: resp.response_body !== undefined ? resp.response_body : '',
+                    status_code: resp.status_code !== undefined ? resp.status_code : 200
+                };
+            }
         }
     };
     sandbox.vflow = vflow;
@@ -694,6 +891,13 @@ function installVFlow(sandbox) {
 function runScript(scriptText, ctxVars) {
     resetCalls();
     spinsBox.value = 0;
+    // ⚠️ 自绘界面是**阻塞**等点击的（`while (result === null)`）⇒ 离线测试里必须
+    //    「自动点掉」，否则转成死循环（撞 `Thread.sleep` 的保险后报成脚本问题）。
+    //    `__androidOpts.autoDismiss === false` 可关掉（给将来要测「点了会怎样」的用例）。
+    uiListenerBox.autoDismiss = !(ctxVars.__androidOpts && ctxVars.__androidOpts.autoDismiss === false);
+    uiListenerBox.autoDismissIndex = (ctxVars.__androidOpts && typeof ctxVars.__androidOpts.autoDismissIndex === 'number')
+        ? ctxVars.__androidOpts.autoDismissIndex
+        : -1;
 
     const sandbox = Object.assign({}, ctxVars);
     sandbox.globalThis = sandbox;
@@ -714,7 +918,14 @@ function runScript(scriptText, ctxVars) {
 
     const context = vm.createContext(sandbox);
     vm.runInContext(scriptText, context, { filename: 'vflow-fluid-cloud.js' });
-    return { sandbox, calls };
+    // ⚠️ `context` 是**追加**字段（向后兼容：调用方全是解构 `{ sandbox }` / `{ calls }`）。
+    //    更新器的离线用例要它 —— 在**同一个沙箱**里 `vm.runInContext(updateText, context)`
+    //    才能复现「eval 进主脚本作用域」那个形态（UPDATE.md §7.4 约束 2）。
+    return { sandbox, calls, context };
 }
 
-module.exports = { runScript, calls, resetCalls, ROOT, resetStorage, TEST_STORAGE_ROOT, mapPath };
+module.exports = {
+    runScript, calls, resetCalls, ROOT, resetStorage, TEST_STORAGE_ROOT, mapPath,
+    // 更新器用例用：请求记录 + 响应配置
+    httpBox
+};

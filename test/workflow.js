@@ -58,15 +58,40 @@ module.exports = function registerWorkflowChecks({ test, assert, assertEq }) {
         assertEq(steps[0].id, 'fluid_js_main', '步骤 id 变了');
     });
 
-    test('⭐ 恰好两个触发器：剪贴板 + 广播', () => {
+    test('⭐ 恰好三个触发器：剪贴板 + 广播 + 手动', () => {
         const triggers = doc().triggers || [];
         assertEq(triggers.map((t) => t.moduleId).sort(),
-            ['vflow.trigger.broadcast', 'vflow.trigger.clipboard'],
-            '触发器集合变了 —— 两条触发路各一个，少一个就少一条触发路');
+            ['vflow.trigger.broadcast', 'vflow.trigger.clipboard', 'vflow.trigger.manual'],
+            '触发器集合变了 —— 三条触发路各一个，少一个就少一条触发路');
         // ⚠️ 触发器 id 被 `inputs` 引用 ⇒ 必须是固定值，不能交给服务端生成
         assertEq(triggers.map((t) => t.id).sort(),
-            ['fluid_click_broadcast', 'fluid_trigger_clipboard'],
+            ['fluid_click_broadcast', 'fluid_trigger_clipboard', 'fluid_trigger_manual'],
             '触发器 id 变了 —— inputs 里的引用会解析不到（静默走空）');
+    });
+
+    test('⭐ 手动触发器带标签「设置」，且与 core.js 的常量逐字一致', () => {
+        const manual = (doc().triggers || []).find((t) => t.moduleId === 'vflow.trigger.manual');
+        assert(manual, '没有手动触发器');
+        // ⚠️⚠️ 必须是**触发器**而不是步骤：vFlow 手动执行时
+        //    `triggerStepId = workflow.manualTrigger()?.id`，而 `TriggerLabel.labelFor`
+        //    只在 `workflow.triggers` 里找 ⇒ 写成步骤的话标签恒为空串，
+        //    core.js 拿不到「设置」⇒ **点了执行什么都没发生**（静默）。
+        assertEq(manual.parameters.__trigger_label, '设置',
+            '手动触发器的标签变了 —— core.js 靠它分流到设置界面');
+
+        // 与源码常量逐字对齐（两处字面量必须一致）
+        const core = fs.readFileSync(path.join(ROOT, 'src', 'core.js'), 'utf8');
+        const m = /var VFLOW_MANUAL_LABEL = "([^"]+)"/.exec(core);
+        assert(m, 'core.js 里找不到 VFLOW_MANUAL_LABEL');
+        assertEq(manual.parameters.__trigger_label, m[1],
+            '工作流里手动触发器的标签与 core.js 的 VFLOW_MANUAL_LABEL 不一致 —— 静默失效');
+
+        // 与其它标签不能撞车（撞了会让识别那条路误进设置界面）
+        const others = (doc().triggers || [])
+            .filter((t) => t.moduleId !== 'vflow.trigger.manual')
+            .map((t) => t.parameters.__trigger_label);
+        assert(!others.includes(manual.parameters.__trigger_label),
+            `手动触发器的标签与其它触发器撞车了（${others.join(' / ')}）`);
     });
 
     test('⭐ script 是 src/bootstrap.js 全文（逐字节）', () => {

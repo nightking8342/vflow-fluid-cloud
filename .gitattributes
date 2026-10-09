@@ -15,3 +15,18 @@
 # 而保形自检要求**逐字节一致** —— `eol=lf` 的语义是「仓库内 LF、检出时转 CRLF」，
 # 那正是要避免的。
 workflow/*.json  -text
+
+# `dist/` 入库后的产物（2026-10-09）。理由与上面那条**完全相同**：
+# `dist/vflow-fluid-cloud.js` / `dist/update.js` 是文本，`dist/*.json` 是 JSON，
+# 而更新器**逐字节比对**长度与内容（`docs/UPDATE.md` §5.5），
+# 两份 `version` 也做**字符串相等**比较 ⇒ 检出时被转成 CRLF 会**静默**地
+# 让「已是最新」永远判不相等（本机 `core.autocrlf=true`，工作区是 LF ⇒ 本机测不出）。
+dist/*.js    -text
+dist/*.json  -text
+
+# 仓库根的 `version`（不是 reference/version）也要 `-text`：
+# 更新器拿**设备上的 version** 与**远端 raw 的 version** 做**字符串相等**比较
+# （`docs/UPDATE.md` §4.3）。本机 `core.autocrlf=true` ⇒ 不加这条的话，检出的是 CRLF
+# 而 GitHub raw 给的是 LF ⇒ **「已是最新」永远判不相等**（本机测不出，换机器才炸）。
+# ⚠️ 更新器侧另做了 trim 兜底（双保险）。
+version  -text

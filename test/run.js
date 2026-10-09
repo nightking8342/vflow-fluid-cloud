@@ -13,10 +13,24 @@
 
 const fs = require('fs');
 const path = require('path');
-const { runScript, calls, ROOT, resetStorage, mapPath } = require('./harness');
+const vm = require('vm');
+const os = require('os');
+const { execFileSync } = require('child_process');
+const { runScript, calls, ROOT, resetStorage, mapPath, httpBox } = require('./harness');
 
 const SCRIPT_PATH = path.join(ROOT, 'dist', 'vflow-fluid-cloud.js');
 const scriptText = fs.readFileSync(SCRIPT_PATH, 'utf8');
+
+const UPDATE_PATH = path.join(ROOT, 'dist', 'update.js');
+const updateText = fs.readFileSync(UPDATE_PATH, 'utf8');
+
+const CLOUD_DIR = mapPath('/sdcard/vFlow/fluid-cloud');
+const UPDATE_URLS = {
+    version: 'https://raw.githubusercontent.com/nightking8342/vflow-fluid-cloud/main/version',
+    script: 'https://raw.githubusercontent.com/nightking8342/vflow-fluid-cloud/main/dist/vflow-fluid-cloud.js',
+    rules: 'https://raw.githubusercontent.com/nightking8342/vflow-fluid-cloud/main/dist/rules.json',
+    nolinkrules: 'https://raw.githubusercontent.com/nightking8342/vflow-fluid-cloud/main/dist/nolinkrules.json'
+};
 
 // ---------------------------------------------------------------------------
 // 测试脚手架
@@ -129,7 +143,12 @@ function run(opts) {
             trigger_label: o.tag !== undefined ? o.tag : '剪切板'
         },
         vars: {},
-        __androidOpts: { browserPackage: o.browser || 'com.android.chrome' }
+        __androidOpts: {
+            browserPackage: o.browser || 'com.android.chrome',
+            // 自绘界面是阻塞等点击的 ⇒ 默认自动点掉收尾按钮（见 harness 的 uiListenerBox）。
+            autoDismiss: o.autoDismiss,
+            autoDismissIndex: o.autoDismissIndex
+        }
     };
     return runScript(scriptText, ctxVars);
 }
@@ -697,6 +716,85 @@ test('顶层分派：普通分享文案仍走识别链路（没被分流改坏�
     assert(!c.log.some((l) => l.includes('点击回传')), '普通文案被误判成点击载荷');
 });
 
+// ===========================================================================
+console.log('\n[11] 手动触发（标签「设置」）→ 设置界面');
+// ===========================================================================
+
+test('⭐ 手动触发（标签「设置」）弹出「选择操作」菜单，且不做链接识别', () => {
+    // ⚠️⚠️ 这条对应上游「点指令图标 → 执行动作」那条路（reference/core.js 尾部的
+    //    `if (DebugMode == false && isRunAction == true)`）。vFlow 侧靠**手动触发器的
+    //    标签**分流 —— 上游那个判据（`{factTag}` 展开失败）在 vFlow 里不存在。
+    //
+    //    静默失效形态：标签写成别的（或没给）⇒ 走识别链路 ⇒ 拿空串识别 ⇒
+    //    **界面上什么都不会发生**，日志里也看不出（只有 adapter 那条「手动触发」能区分）。
+    const { calls: c, sandbox } = run({ text: '', tag: '设置' });
+
+    assertEq(c.notify.length, 0, '手动触发那次执行不该发通知 —— 那会弹一个无意义的岛');
+    assertEq(c.uiRoots.length, 1, '没有弹出自绘界面（showOptionsDialog 的 addView 没发生）');
+    // 菜单的四个选项标题 —— 用界面上真实出现过的文本断言，而不是看函数被调用
+    for (const item of ['设置指令', '编辑规则', '编辑无链接规则', '取消']) {
+        assert(c.uiText.includes(item), `菜单里没有「${item}」（实际：${c.uiText.join(' / ')}）`);
+    }
+    assertEq(c.uiText[0], '选择操作', '菜单标题不是「选择操作」');
+    // adapter 那条日志是这条路**唯一**的痕迹
+    assert(c.log.some((l) => l.includes('手动触发')), '没有「手动触发」日志 —— adapter 的标签分支没生效？');
+    assertEq(sandbox.tiggerTag, '设置', 'tiggerTag 不是「设置」');
+});
+
+test('⚠️ 手动触发**不读规则库**（没落进识别链路）', () => {
+    // 反证：识别链路会读 config.json / rules.json 并走 RecognitionMain。
+    // 手动触发走的是分派里最早那条分支，不该碰它们 —— 碰了就说明分流位置错了。
+    //
+    // ⚠️ 判据只能是「产出了什么」，不能是「日志里有没有『识别』二字」——
+    //    `tiggerTag == VFLOW_MANUAL_LABEL || (… isRunAction == true)` 这个表达式
+    //    在剥注释前会命中「识别」两个字（注释里写着「不做链接识别」），
+    //    拿它当判据会**误报**（实测踩过）。
+    const { calls: c } = run({ text: '', tag: '设置' });
+    assertEq(c.notify.length, 0, '手动触发那条路弹了通知 —— 它不该做识别');
+    assertEq(c.startActivity.length, 0, '手动触发那条路启动了 Activity —— 它不该打开链接');
+    // 菜单标题是识别链路**不会**产出的文本（它是这条路独有的证据）
+    assert(c.uiText.includes('选择操作'), '没弹「选择操作」菜单 —— 分派没生效');
+});
+
+test('标签「设置」在识别那条路上**不会**被当成普通文案（分流在最外层）', () => {
+    // 反向锁：给个真链接 + 标签「设置」⇒ 仍然进设置界面，**不弹岛**
+    // （标签优先于输入，与上游 `isRunAction` 优先于识别一致）
+    const { calls: c } = run({ text: 'https://www.bilibili.com/video/BV1xx', tag: '设置' });
+    assertEq(c.notify.length, 0, '标签是「设置」但弹了岛 —— 分流被绕过');
+    assert(c.uiRoots.length >= 1, '标签是「设置」但没弹设置界面');
+});
+
+test('⭐ 点「设置指令」→ 弹出设置界面（菜单 → 二级界面那条链路是通的）', () => {
+    // ⚠️ 上游那条路是**两级**的：先 `showOptionsDialog` 选一项，再 `showsettingsui`。
+    //    只测第一级的话，「选了之后弹不出来」这种错测不到。
+    //    `autoDismissIndex = 0` = 点菜单里的第一项「设置指令」。
+    const { calls: c } = run({ text: '', tag: '设置', autoDismissIndex: 0 });
+    assert(c.uiText.includes('指令设置'), '没弹出设置界面（标题「指令设置」没出现）');
+    // 设置界面的标志性菜单项（与 core.js 的 menuTitles 一致）
+    for (const t of ['编辑顶级域名列表', '编辑电子邮箱列表', '浏览器黑名单列表']) {
+        assert(c.uiText.includes(t), `设置界面里没有「${t}」`);
+    }
+    // 二级界面是**另一个** addView（不是同一层里换文本）
+    assert(c.uiRoots.length >= 2, '只 addView 了一次 —— 二级界面没弹出来？');
+});
+
+test('⭐ 点「编辑规则」→ 弹出规则编辑器，且内容是**设备上那份** rules.json', () => {
+    // ⚠️ 判据是「编辑器读到了哪个文件」—— 路径写错（比如还是 ShortX 的 /data/system/shortx*）
+    //    的表现是**编辑器弹出来但内容为空**，而它的 catch 会把读失败吞成 `input.setText("")`
+    //    ⇒ 界面上看不出区别。这里断的是「文本被 set 进了 EditText」。
+    const { calls: c } = run({ text: '', tag: '设置', autoDismissIndex: 1 });
+    // 第二级是规则编辑器：它的标题 + 读到的文件内容（`calls.uiText` 里有那条 JSON）
+    assert(c.uiText.includes('规则编辑器(规则在下面)'), '没弹出规则编辑器');
+    assert(c.uiText.some((t) => t.includes('"tigger"')),
+        '规则编辑器里没有规则内容 —— 读的不是设备上那份 rules.json（路径错了？）');
+    assert(c.uiRoots.length >= 2, '只 addView 了一次 —— 二级界面没弹出来？');
+});
+
+test('其它标签不受影响（「剪切板」仍走识别）', () => {
+    const { calls: c } = run({ text: 'https://www.bilibili.com/video/BV1xx', tag: '剪切板' });
+    assertEq(c.notify.length, 1, '剪贴板那一路被设置界面截走了');
+});
+
 test('通知带系统级超时（setTimeoutAfter），不再依赖脚本自己 cancel', () => {
     // ⚠️⚠️ 起因：真机实测「岛一会儿就消失了，但通知栏里那条一直在」（用户 2026-10-08）。
     //    真因是本次改动删掉了上游那段「超时后 NotificationManager.cancel」的线程
@@ -831,7 +929,16 @@ test('reference/ 是完整镜像（未移植的文件也留着，它们是对照
     // 与 src/ 的对应关系：core.js 是移植过的，onOpen/update 没有
     assert(fs.existsSync(path.join(ROOT, 'src', 'core.js')), 'src/core.js 应在（core.js 已移植）');
     assert(!fs.existsSync(path.join(ROOT, 'src', 'onOpen.js')), 'src/ 不该有 onOpen.js（未移植）');
-    assert(!fs.existsSync(path.join(ROOT, 'src', 'update.js')), 'src/ 不该有 update.js（未移植）');
+    // ⚠️ **2026-10-09 翻转**：原来是「src/ 不该有 update.js（未移植）」。
+    //    现在**更新机制已实施**，`src/update.js` 是**新写的更新器**（不是上游那份的移植）。
+    //    上游那份 `reference/update.js` 仍作对照基线留着。
+    assert(fs.existsSync(path.join(ROOT, 'src', 'update.js')), 'src/update.js 应在（更新器已实施）');
+    // ⚠️ **反向锁**：它必须是**新写的**，不能是把上游那份拷过来改个名 ——
+    //    上游那份做的是「老格式规则转换 + 非原子写」，与本项目定案（按 name 合并 + 原子写）不同。
+    const srcUpdate = fs.readFileSync(path.join(ROOT, 'src', 'update.js'), 'utf8').replace(/\r\n/g, '\n');
+    const refUpdate = fs.readFileSync(path.join(dir, 'update.js'), 'utf8').replace(/\r\n/g, '\n');
+    assert(srcUpdate !== refUpdate, 'src/update.js 不该照抄上游 reference/update.js');
+    assert(srcUpdate.includes('vflowUpdateRun'), 'src/update.js 不像是本项目的更新器');
 
     // 镜像必须逐字节一致（抽两个文件核，全量 diff 太重）
     const sameAs = (rel) => {
@@ -901,6 +1008,441 @@ test('package.json 的脚本已跟上架构调整', () => {
     //    别名没了那些文档就指不到东西。
     assert(/build-workflow\.py/.test(s['build:workflow'] || ''),
         'package.json 少了 build:workflow（tools/build-workflow.py）');
+});
+
+// ===========================================================================
+console.log('\n[12] 更新机制（docs/UPDATE.md）');
+// ===========================================================================
+
+// ⚠️ 本节沿用 [2] 节的「产物 + 源码两路」风格。
+//
+// ⚠️⚠️ **怎么在离线测试里跑 update.js**：它「顶层直接开跑」，一 eval 就会发网络请求。
+//    ⇒ 靠它末尾那道闸（`VFLOW_UPDATE_ENABLED`）：不设就**只加载不执行**，
+//      纯函数（校验 / 合并）可以直接测。要测主流程时，在**同一个沙箱**里
+//      `vm.runInContext(updateText, ctx)`（此时脚本顶层的 `VFLOW_UPDATE_ENABLED`
+//      已存在 = true）—— 那正是「eval 进主脚本作用域」的形态（UPDATE.md §7.4 约束 2）。
+
+/**
+ * 起一个沙箱，**加载主脚本**（会写 config 自举），返回 `{ sandbox, calls, context }`。
+ *
+ * ⚠️ 先把**规则库复位**成 dist 里那份 —— 本节的用例会故意把设备目录里的
+ *    `rules.json` 换成假的（测合并），而主脚本的默认输入 `'x'` 会走识别链路
+ *    读它 ⇒ 不复位的话**下一条用例会在 `matchRules` 里崩**（规则缺 `tigger`），
+ *    看起来像脚本坏了（实际是用例之间互相污染）。
+ */
+function loadMain() {
+    installRules();
+    return run({ text: 'x' });
+}
+
+/** 在已有沙箱里 eval 更新器（不设 `VFLOW_UPDATE_ENABLED` ⇒ 只定义、不跑主流程）。 */
+function loadUpdate(ctx) {
+    vm.runInContext(updateText, ctx, { filename: 'update.js' });
+}
+
+/** 在已有沙箱里 eval 更新器**并放行主流程**。 */
+function runUpdate(ctx) {
+    vm.runInContext('var VFLOW_UPDATE_ENABLED = true;\n' + updateText, ctx, { filename: 'update.js' });
+}
+
+/** 配远端响应（url → body/status），未配的一律 404（见 harness 的 httpBox）。 */
+function mockRemote(map) {
+    httpBox.responses = {};
+    for (const [url, v] of Object.entries(map || {})) {
+        httpBox.responses[url] = typeof v === 'string' ? { response_body: v, status_code: 200 } : v;
+    }
+}
+
+/** 造一份合法的远端主脚本文本（够长 + 含特征串）。 */
+const FAKE_MAIN = '// remote main script\nvar FLUID_CLOUD_ACTION_CLICK = "com.chaomixian.vflow.fluidcloud.CLICK";\n' + '// padding\n'.repeat(200);
+
+test('rules 合并：本地独有在前、同名远端覆盖、远端新增追加（顺序确定）', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const merge = sandbox.vflowUpdateMergeRules;
+
+    const local = [
+        { name: 'only-local' },
+        { name: 'same' , from: 'local' },
+        { name: 'local-2' }
+    ];
+    const remote = [
+        { name: 'same', from: 'remote' },
+        { name: 'new-1' },
+        { name: 'new-2' }
+    ];
+    const merged = merge(local, remote);
+
+    // ⚠️ 用 name 序列断言 —— **不看对象遍历顺序**（顺序会影响 matchRules 命中结果）
+    //    （放在这里是因为下面几个用例要临时替换设备目录里的 rules.json）
+    assertEq(merged.map((x) => x.name), ['only-local', 'local-2', 'same', 'new-1', 'new-2'],
+        '合并顺序不对（本地独有在前、远端在后）');
+    // 同名 ⇒ 远端覆盖本地
+    assertEq(merged.find((x) => x.name === 'same').from, 'remote', '同名规则没被远端覆盖');
+    // 本地独有 ⇒ 原对象保留
+    assertEq(merged.find((x) => x.name === 'only-local').name, 'only-local');
+});
+
+test('rules 合并：空本地 / 空远端 / 非数组入参都不崩', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const merge = sandbox.vflowUpdateMergeRules;
+    assertEq(merge([], [{ name: 'a' }]).map((x) => x.name), ['a']);
+    assertEq(merge([{ name: 'a' }], []).map((x) => x.name), ['a']);
+    assertEq(merge(null, null), []);
+    assertEq(merge(undefined, [{ name: 'b' }]).map((x) => x.name), ['b']);
+});
+
+test('config 合并：补缺失键 / 数组并集去重 / 标量保留本地 / 对象整体保留本地', () => {
+    const { sandbox } = loadMain();
+    const merge = sandbox.VFLOW_BOOTSTRAP ? null : null; // 占位（见下）
+    // ⚠️ mergeConfig 在 adapter 的 IIFE 内，沙箱里拿不到 ⇒ 走**产物行为**断言：
+    //    写一份旧版本 config，重跑脚本，看合并后的 config.json。
+    const cfgPath = path.join(CLOUD_DIR, 'config.json');
+    const old = {
+        Top_Level_Domain: ['com', '本地独有'],       // 数组：并集
+        Fluid_Cloud_Position: '底部',                 // 标量：保留本地
+        Window_Configuration: { s1: [1, 2, 3] },      // 对象：整体保留本地
+        User_Own_Key: 'keep-me'                        // 本地独有键：保留
+        // Email_Keyword_List 缺失 ⇒ 用默认补
+    };
+    fs.writeFileSync(cfgPath, '一.配置版本：\n1.4\n二.字段解释见 DESIGN.md\n三.配置：\n' + JSON.stringify(old, null, 2), 'utf8');
+
+    loadMain(); // 再跑一次 ⇒ 走「版本不同 ⇒ 合并」分支
+    const merged = JSON.parse(fs.readFileSync(cfgPath, 'utf8').split('三.配置：\n')[1]);
+
+    assert(merged.Email_Keyword_List && merged.Email_Keyword_List.length > 0, '缺失键没被默认补上');
+    assert(merged.Top_Level_Domain.includes('com'), '数组并集丢了默认项');
+    assert(merged.Top_Level_Domain.includes('本地独有'), '数组并集丢了本地项');
+    // ⚠️ 默认在前（照上游）—— 第一个元素必须是默认列表的头
+    assertEq(merged.Top_Level_Domain[0], 'com', '数组并集顺序不是「默认在前」');
+    assertEq(merged.Top_Level_Domain.filter((x) => x === 'com').length, 1, '数组并集没去重');
+    assertEq(merged.Fluid_Cloud_Position, '底部', '标量没保留本地');
+    assertEq(merged.Window_Configuration, { s1: [1, 2, 3] }, '对象键没整体保留本地');
+    assertEq(merged.User_Own_Key, 'keep-me', '本地独有键被抹掉了');
+    // 版本头必须被写成新版本号
+    assert(fs.readFileSync(cfgPath, 'utf8').includes('1.5'), '版本头没写成新版本号');
+});
+
+test('版本闸：CONFIG_VERSION 相同 ⇒ 不写盘（用户手改的 config 原样保留）', () => {
+    const cfgPath = path.join(CLOUD_DIR, 'config.json');
+    // 先正常跑一次（写出 1.5 的 config），再手改一个「闸外」的痕迹
+    loadMain();
+    let txt = fs.readFileSync(cfgPath, 'utf8');
+    txt = txt.replace('"Fluid_Cloud_Position": "顶部"', '"Fluid_Cloud_Position": "我手改的"');
+    fs.writeFileSync(cfgPath, txt, 'utf8');
+    const before = fs.readFileSync(cfgPath, 'utf8');
+
+    loadMain(); // 版本相同 ⇒ 直接 return，连合并都不做
+    assertEq(fs.readFileSync(cfgPath, 'utf8'), before, '版本相同却写了盘 —— 用户手改的 config 被重写了');
+});
+
+test('内容校验：主脚本长度 + 特征串', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const v = sandbox.vflowUpdateValidateMainScript;
+    assertEq(v(FAKE_MAIN), null, '合法主脚本被判失败');
+    assert(v('short') !== null, '过短的应判失败');
+    assert(v('x'.repeat(2000)) !== null, '缺特征串的应判失败（那正是 404 的 HTML）');
+    assert(v(null) !== null, '非字符串应判失败');
+});
+
+test('内容校验：rules JSON.parse + 数组 + 每项 name', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const v = sandbox.vflowUpdateValidateRulesJson;
+    assertEq(v('[{"name":"a"}]', 'x'), null, '合法规则库被判失败');
+    assert(v('<html>404</html>', 'x') !== null, 'HTML 应判失败');
+    assert(v('{"name":"a"}', 'x') !== null, '对象（非数组）应判失败');
+    assert(v('[]', 'x') !== null, '空数组应判失败');
+    assert(v('[{"tigger":["a"]}]', 'x') !== null, '缺 name 的项应判失败');
+    assert(v('[{"name":""}]', 'x') !== null, 'name 为空串应判失败');
+});
+
+test('内容校验：version 非空 / 短 / 字符集', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const v = sandbox.vflowUpdateValidateVersion;
+    assertEq(v('0.3.0\n'), null, '正常版本号被判失败（带尾换行也要通过）');
+    assert(v('') !== null, '空应判失败');
+    assert(v('   ') !== null, '全空白应判失败');
+    assert(v('x'.repeat(64)) !== null, '过长应判失败');
+    assert(v('0.3.0 <html>') !== null, '含非法字符应判失败');
+});
+
+test('⭐ status_code !== 200 时判失败（HTTP 模块对 404 不抛异常）', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+    // 远端全部 404（带一段 HTML body）—— 若实现只看「有没有抛异常」，会把 HTML 当脚本写进去
+    // 设备目录里放一份「旧」主脚本 —— 拉版本失败时它必须**一个字都没动**
+    const scriptPath = path.join(CLOUD_DIR, 'vflow-fluid-cloud.js');
+    fs.writeFileSync(scriptPath, 'OLD-SCRIPT', 'utf8');
+    mockRemote({
+        [UPDATE_URLS.version]: { response_body: '<html>404 Not Found</html>', status_code: 404 }
+    });
+
+    runUpdate(context);
+
+    assert(c.toast.some((t) => String(t).includes('更新失败')), `失败必须显式弹错（收到：${JSON.stringify(c.toast)}）`);
+    assertEq(fs.readFileSync(scriptPath, 'utf8'), 'OLD-SCRIPT', '拉版本失败时不该动任何本地文件');
+    // ⚠️ 关键：把 404 的 HTML 当版本号会「看起来成功」⇒ 断言它没往下走
+    assertEq(httpBox.requests.length, 1, '拉版本失败后不该再拉别的文件');
+});
+
+test('原子写：写 .tmp → renameTo；成功后 .tmp 不存在、目标内容 = 新内容', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const target = path.join(CLOUD_DIR, 'atomic-target.txt');
+    fs.writeFileSync(target, 'OLD', 'utf8');
+
+    const err = sandbox.vflowUpdateAtomicWrite(target, 'NEW-CONTENT', null);
+    assertEq(err, null, `原子写失败：${err}`);
+    assertEq(fs.readFileSync(target, 'utf8'), 'NEW-CONTENT', '目标没被换成新内容');
+    assert(!fs.existsSync(target + '.tmp'), '成功后 .tmp 应被 rename 掉');
+});
+
+test('原子写：校验不过 ⇒ 目标不被改动，.tmp 被清掉', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const target = path.join(CLOUD_DIR, 'atomic-target2.txt');
+    fs.writeFileSync(target, 'OLD', 'utf8');
+
+    const err = sandbox.vflowUpdateAtomicWrite(target, 'bad', () => '故意判失败');
+    assert(err !== null, '校验不过应返回错误');
+    assertEq(fs.readFileSync(target, 'utf8'), 'OLD', '校验不过却动了目标文件');
+    assert(!fs.existsSync(target + '.tmp'), '校验不过应清掉 .tmp');
+});
+
+test('原子写：renameTo 返回 false ⇒ 目标不被改动（不做「先删再改名」的破坏性兜底）', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const target = path.join(CLOUD_DIR, 'atomic-target3.txt');
+    fs.writeFileSync(target, 'OLD', 'utf8');
+
+    // 让 renameTo 失败一次
+    const origRename = sandbox.java.io.File.prototype.renameTo;
+    sandbox.java.io.File.prototype.renameTo = function () { return false; };
+    let err;
+    try {
+        err = sandbox.vflowUpdateAtomicWrite(target, 'NEW', null);
+    } finally {
+        sandbox.java.io.File.prototype.renameTo = origRename;
+    }
+    assert(err !== null, 'renameTo 失败应返回错误');
+    assertEq(fs.readFileSync(target, 'utf8'), 'OLD', 'renameTo 失败却改动了目标文件');
+    assert(!fs.existsSync(target + '.tmp'), 'renameTo 失败应清掉 .tmp');
+});
+
+test('主流程成功：三份产物被覆盖/合并，version 最后写，提示含「下次执行生效」', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+
+    // 本地放一份「旧」rules.json（含一条本地独有规则）
+    const localRules = [{ name: '我的私有规则', tigger: ['x\\.local'] }];
+    fs.writeFileSync(path.join(CLOUD_DIR, 'rules.json'), JSON.stringify(localRules), 'utf8');
+    // nolinkrules 本地清空（默认那份是 dist 里的 2 条 —— 留着会让断言依赖它们）
+    fs.writeFileSync(path.join(CLOUD_DIR, 'nolinkrules.json'), '[]', 'utf8');
+    // 本地 version 设成旧值（与远端不同 ⇒ 不过闸）
+    fs.writeFileSync(path.join(CLOUD_DIR, 'version'), '0.2.0', 'utf8');
+
+    const remoteRules = [{ name: '官方规则A' }, { name: '官方规则B' }];
+    const remoteNoLink = [{ name: '官方无链接' }];
+    mockRemote({
+        [UPDATE_URLS.version]: '0.3.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: JSON.stringify(remoteRules),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify(remoteNoLink)
+    });
+
+    runUpdate(context);
+
+    // 主脚本被整份覆盖
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'vflow-fluid-cloud.js'), 'utf8'), FAKE_MAIN, '主脚本没被覆盖');
+    // rules 增量合并（本地独有在前 + 远端）
+    const mergedRules = JSON.parse(fs.readFileSync(path.join(CLOUD_DIR, 'rules.json'), 'utf8'));
+    assertEq(mergedRules.map((x) => x.name), ['我的私有规则', '官方规则A', '官方规则B'], 'rules 合并结果不对');
+    // nolinkrules 远端整份（本地是空）
+    const mergedNoLink = JSON.parse(fs.readFileSync(path.join(CLOUD_DIR, 'nolinkrules.json'), 'utf8'));
+    assertEq(mergedNoLink.map((x) => x.name), ['官方无链接']);
+    // version 被写（内容 = 远端原样）
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'version'), 'utf8'), '0.3.0');
+    // 成功提示必须含「下次执行生效」（bootstrap 已把脚本 eval 进内存）
+    assert(c.toast.some((t) => String(t).includes('下次执行生效')), `成功提示不对：${JSON.stringify(c.toast)}`);
+    assert(c.toast.some((t) => String(t).includes('0.2.0 → 0.3.0')), '提示里应有「旧 → 新」');
+});
+
+test('⭐ 拉主脚本失败 ⇒ 后续两份都不拉（避免「新规则 + 旧脚本」）', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+    fs.writeFileSync(path.join(CLOUD_DIR, 'version'), '0.2.0', 'utf8');
+    fs.writeFileSync(path.join(CLOUD_DIR, 'rules.json'), JSON.stringify([{ name: '本地的' }]), 'utf8');
+    const rulesBefore = fs.readFileSync(path.join(CLOUD_DIR, 'rules.json'), 'utf8');
+
+    mockRemote({
+        [UPDATE_URLS.version]: '0.3.0',
+        // script 未配 ⇒ 404
+        [UPDATE_URLS.rules]: JSON.stringify([{ name: 'X' }]),
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'Y' }])
+    });
+    runUpdate(context);
+
+    const urls = httpBox.requests.map((r) => r.url);
+    assert(!urls.includes(UPDATE_URLS.rules), '主脚本失败后仍拉了 rules.json');
+    assert(!urls.includes(UPDATE_URLS.nolinkrules), '主脚本失败后仍拉了 nolinkrules.json');
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'rules.json'), 'utf8'), rulesBefore, '主脚本失败却动了 rules.json');
+    assert(c.toast.some((t) => String(t).includes('更新失败')), '失败要显式弹错');
+});
+
+test('⭐ 规则写失败 ⇒ 主脚本已更新要显式提示「脚本已更新，规则未更新」，且 version 不写', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+    fs.writeFileSync(path.join(CLOUD_DIR, 'version'), '0.2.0', 'utf8');
+
+    mockRemote({
+        [UPDATE_URLS.version]: '0.3.0',
+        [UPDATE_URLS.script]: FAKE_MAIN,
+        [UPDATE_URLS.rules]: '<html>404</html>', // 校验不过 ⇒ 这一份失败
+        [UPDATE_URLS.nolinkrules]: JSON.stringify([{ name: 'Y' }])
+    });
+    runUpdate(context);
+
+    assert(c.toast.some((t) => String(t).includes('规则未更新')), `应提示「规则未更新」：${JSON.stringify(c.toast)}`);
+    // version 是「完整成功」的标志 ⇒ 这里必须**没写**
+    assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'version'), 'utf8'), '0.2.0', '中途失败却写了 version（下次不会重来）');
+    // nolinkrules 是逐份独立的 ⇒ 仍应被合并写（本地独有在前 + 远端新增）
+    const nl = JSON.parse(fs.readFileSync(path.join(CLOUD_DIR, 'nolinkrules.json'), 'utf8'));
+    assertEq(nl[nl.length - 1].name, 'Y', '逐份独立：nolinkrules 不该被 rules 的失败带累');
+});
+
+test('version 相同 ⇒ 弹「已是最新」；选「否」⇒ 一个文件都没动', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+    // 本地 version 与远端一致
+    fs.writeFileSync(path.join(CLOUD_DIR, 'version'), '0.3.0', 'utf8');
+    const scriptPath = path.join(CLOUD_DIR, 'vflow-fluid-cloud.js');
+    fs.writeFileSync(scriptPath, 'OLD-SCRIPT', 'utf8');
+    mockRemote({ [UPDATE_URLS.version]: '0.3.0' });
+
+    // autoDismissIndex = -1（默认）= 点最后一个按钮「否」
+    runUpdate(context);
+
+    assert(c.uiText.includes('已是最新（0.3.0）。要强制重新下载吗？'),
+        `没弹「已是最新」确认框：${JSON.stringify(c.uiText.slice(0, 3))}`);
+    assertEq(fs.readFileSync(scriptPath, 'utf8'), 'OLD-SCRIPT', '选了「否」却动了文件');
+    assertEq(httpBox.requests.length, 1, '选了「否」不该再拉别的文件');
+    assert(c.toast.some((t) => String(t).includes('已取消')), '应提示「已取消」');
+});
+
+test('⭐ 缺失显式弹错：读不到 update.js 时走手动分派 ⇒ 弹「更新器缺失」，不是静默', () => {
+    // 删掉 update.js，跑一次「设置」标签的手动分派（autoDismissIndex = 3 = 「检查更新」）
+    fs.rmSync(path.join(CLOUD_DIR, 'update.js'), { force: true });
+    const { calls: c } = run({ text: '', tag: '设置', autoDismissIndex: 3 });
+    assert(c.toast.some((t) => String(t).includes('更新器缺失')),
+        `点了「检查更新」但 update.js 缺失时必须显式弹错：${JSON.stringify(c.toast)}`);
+});
+
+test('⭐ 失败提示不被 show_toast 开关吞掉（走 VFLOW_ADAPTER.toast 而非 showToast）', () => {
+    const { sandbox, context, calls: c } = loadMain();
+    loadUpdate(context);
+    // 用户关掉提示开关
+    sandbox.show_toast = false;
+    fs.writeFileSync(path.join(CLOUD_DIR, 'version'), '0.2.0', 'utf8');
+    mockRemote({}); // 全部 404
+    runUpdate(context);
+    assert(c.toast.some((t) => String(t).includes('更新失败')),
+        `show_toast=false 时失败提示被吞了：${JSON.stringify(c.toast)}`);
+});
+
+test('「检查更新」菜单项存在（源码 + 产物两路）', () => {
+    assert(readSrc('core.js').includes('"检查更新"'), 'src/core.js 的菜单里没有「检查更新」');
+    assert(scriptText.includes('"检查更新"'), '产物里没有「检查更新」');
+    // 反向锁：它必须返回哨兵 "update"（顶层分派靠它做「读 + eval」）
+    assert(/return "update"/.test(readSrc('core.js')), '没返回哨兵 "update"');
+});
+
+test('主脚本**不含** update.js 的内容（它必须是独立文件）', () => {
+    assert(!scriptText.includes('vflowUpdateRun'), '主脚本里混进了更新器（vflowUpdateRun）');
+    assert(!scriptText.includes('VFLOW_UPDATE_BASE_URL'), '主脚本里混进了更新器（远端基址）');
+    assert(!scriptText.includes('raw.githubusercontent.com'), '主脚本里出现了远端地址 —— 更新器没独立出去？');
+});
+
+test('ensureRules 用 exists() + 长度下界（源码侧锚）', () => {
+    const a = readSrc('adapter.js');
+    assert(/new java\.io\.File\(p\)/.test(a) || /\.exists\(\)/.test(a), 'ensureRules 没用 exists()');
+    assert(/\.length\(\)/.test(a), 'ensureRules 没有长度下界 —— 空文件会静默识别不出');
+    assert(!/if \(VFLOW_ADAPTER\.readText\(rulesPath\) === null\)/.test(a),
+        'ensureRules 还在读全文只为判存在（应改为 exists() + length()）');
+});
+
+test('update.js 里 renameTo 检查了返回值（原子写不能只调不看）', () => {
+    const u = readSrc('update.js');
+    assert(u.includes('renameTo'), 'update.js 没有 renameTo');
+    // 必须把返回值接住并判（`ok = …renameTo(…)` + `if (!ok)`）
+    assert(/=\s*new java\.io\.File\(tmp\)\.renameTo\(/.test(u), 'renameTo 的返回值没被接住');
+    assert(/if \(!ok\)/.test(u), 'renameTo 的返回值没被检查');
+});
+
+test('update.js 末尾是闸而不是裸顶层调用（否则离线一加载就发网络请求）', () => {
+    const u = readSrc('update.js');
+    assert(/if \(typeof VFLOW_UPDATE_ENABLED !== "undefined" && VFLOW_UPDATE_ENABLED\)/.test(u),
+        'update.js 末尾不是 VFLOW_UPDATE_ENABLED 闸');
+    // 反向锁：不能有裸的顶层 `vflowUpdateRun();`
+    assert(!/^vflowUpdateRun\(\);/m.test(u), 'update.js 有裸顶层调用 —— 会污染离线测试');
+});
+
+test('HTTP 调用传了 timeout=30（默认 10 秒拉 144 KB 会超时）', () => {
+    const u = readSrc('update.js');
+    assert(/VFLOW_UPDATE_TIMEOUT = 30/.test(u), 'timeout 不是 30');
+    assert(/timeout: VFLOW_UPDATE_TIMEOUT/.test(u), 'http_request 没传 timeout');
+    // 反向锁：不能传 proxy 参数（连通性交给用户 ⇒ 跟随全局，UPDATE.md §1 第 1/2 条）。
+    // ⚠️ 必须剥注释后判 —— 文件里那段解释「为什么**不**传 proxy_mode」的注释
+    //    本身含这个词，不剥会误报（与 [2] 节 stripComments 的用途同理）。
+    const uCode = stripComments(u);
+    assert(!/proxy_mode/.test(uCode), 'update.js 传了 proxy_mode —— 应跟随全局代理');
+});
+
+// ===========================================================================
+console.log('\n[13] 产物与源一致（dist/ 入库新引入的风险）');
+// ===========================================================================
+
+// ⚠️⚠️ 这条对应 UPDATE.md §8 第 6 条 —— `dist/` 入库之后，**改了 src/ 忘了重跑
+//    `npm run build` 就提交** 会让仓库里的产物是旧的，而**两边都看不出来**。
+//
+// ⚠️ **局限（如实记录）**：`npm run check` 是「先 build 再 test」⇒ 在 `npm run check`
+//    这条流程下本节的断言**恒绿**。它的价值在于**单独跑 `npm test`** 时
+//    （以及验证 generate.js 的输出是确定性的）。
+//
+// ⚠️ 做法：把 src 复制到**临时目录**重跑 generate，再与真实 `dist/` **逐字节**比 ——
+//    这样**不污染真实 `dist/`**（在真实 dist 里重跑会掩盖「忘了构建」这件事本身）。
+
+test('dist/ 里的两个产物 == 现在重跑一次 generate 的输出（逐字节）', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vfc-gen-'));
+    try {
+        fs.mkdirSync(path.join(tmpRoot, 'src'), { recursive: true });
+        for (const f of ['adapter.js', 'core.js', 'update.js', 'generate.js']) {
+            fs.copyFileSync(path.join(ROOT, 'src', f), path.join(tmpRoot, 'src', f));
+        }
+        // `ROOT` 由 `__dirname/..` 推出 ⇒ 临时目录自成一体
+        execFileSync(process.execPath, [path.join(tmpRoot, 'src', 'generate.js')], { cwd: tmpRoot });
+
+        for (const f of ['vflow-fluid-cloud.js', 'update.js']) {
+            const fresh = fs.readFileSync(path.join(tmpRoot, 'dist', f));
+            const committed = fs.readFileSync(path.join(ROOT, 'dist', f));
+            assert(fresh.equals(committed),
+                `dist/${f} 与「重跑一次 generate」的输出不一致 —— 改了 src/ 忘了跑 npm run build？`);
+        }
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+});
+
+test('dist/update.js 存在，且其内容 = banner + src/update.js', () => {
+    assert(fs.existsSync(UPDATE_PATH), 'dist/update.js 不存在 —— npm run build 的第二输出没生效？');
+    assert(updateText.includes('vflowUpdateRun'), 'dist/update.js 不像更新器');
+    assert(updateText.includes(readSrc('update.js').slice(0, 200)),
+        'dist/update.js 不是 src/update.js 的内容');
+    // ⚠️ 反向锁：产物带「不要手改」banner
+    assert(/不要手改/.test(updateText), 'dist/update.js 缺「构建产物、勿手改」banner');
 });
 
 // ===========================================================================

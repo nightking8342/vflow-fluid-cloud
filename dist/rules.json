@@ -1,0 +1,616 @@
+[
+  {
+    "name": "115",
+    "type": "url",
+    "tigger": [
+      "[/.]115cdn\\.com",
+      "[/.]115\\.com"
+    ],
+    "check": "oof.disk://",
+    "Custom_variable": [
+      {
+        "name": "yywlink",
+        "pattern": "^(.*?)(#|$)",
+        "text": "link",
+        "index": 1
+      },
+      {
+        "name": "password",
+        "pattern": "\\?password=([^#]*)(#|$)",
+        "text": "link",
+        "index": 1
+      },
+      {
+        "name": "cleancode",
+        "pattern": "^.{4}",
+        "text": "code",
+        "index": 0
+      }
+    ],
+    "rule": [
+      {
+        "condition": [
+          {
+            "condition_type": "withcode"
+          },
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "password"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "oof.disk://openurl/【yywlink】?password=【cleancode】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "password"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "oof.disk://openurl/【yywlink】"
+      },
+      {
+        "rule_text": "oof.disk://openurl/【yywlink】"
+      }
+    ]
+  },
+  {
+    "name": "123网盘",
+    "type": "url",
+    "clearClipboard": true,
+    "tigger": [
+      "123pan\\.com",
+      "www\\.123\\d{3}\\.com",
+      "123pan.cn"
+    ],
+    "check": "com.mfcloudcalculate.networkdisk",
+    "Custom_variable": [
+      {
+        "name": "sharekey",
+        "pattern": "\\/s\\/([^#&?.]*)[#&?.]?",
+        "text": "link",
+        "index": 1
+      },
+      {
+        "name": "sharepwd",
+        "pattern": "(?:\\?|&)pwd=([^#&\\?]*)(?:#|&|\\?|$)",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "rule": [
+      {
+        "condition": [
+          {
+            "condition_type": "withcode"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "pan://umeng.com/share/list?sharePwd=【code】&_sdk_=umeng&action=share_list&shareKey=【sharekey】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "pwd="
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "pan://umeng.com/share/list?sharePwd=【sharepwd】&_sdk_=umeng&action=share_list&shareKey=【sharekey】"
+      },
+      {
+        "rule_text": "pan://umeng.com/share/list?sharePwd=&_sdk_=umeng&action=share_list&shareKey=【sharekey】"
+      }
+    ]
+  },
+  {
+    "name": "1688",
+    "tigger": [
+      "[/.]1688\\.com"
+    ],
+    "type": "url",
+    "check": "com.alibaba.wireless",
+    "rule": [
+      {
+        "rule_text": "wireless1688://ma.m.1688.com/plugin?url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "X",
+    "tigger": [
+      "[/.]x\\.com",
+      "twitter\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.twitter.android"
+  },
+  {
+    "name": "PliPlus",
+    "tigger": [
+      "bilibili\\.com",
+      "b23\\.tv",
+      "bilibili\\.cn",
+      "bilibili\\.tv",
+      "bili22\\.cn",
+      "bili23\\.cn",
+      "bili33\\.cn",
+      "m\\.acg\\.tv",
+      "bili2233\\.cn",
+      "bilibili\\.smgbb\\.cn"
+    ],
+    "type": "pkg",
+    "pkg": "com.example.piliplus"
+  },
+  {
+    "name": "telegram",
+    "tigger": [
+      "t\\.me/\\+",
+      "t\\.me/joinchat/",
+      "t\\.me/[^/]+\\?start=",
+      "t\\.me/(?!\\+)(?!joinchat/)[^/?]+$"
+    ],
+    "type": "url",
+    "check": "org.telegram.plus",
+    "Custom_variable": [
+      {
+        "name": "邀请码",
+        "action": "match",
+        "pattern": "t\\.me/(?:\\+|joinchat/)([A-Za-z0-9_-]+)",
+        "text": "link",
+        "index": 1
+      },
+      {
+        "name": "机器人参数",
+        "action": "match",
+        "pattern": "t\\.me/([^/]+)\\?start=([A-Za-z0-9_-]+)",
+        "text": "link",
+        "index": 2
+      },
+      {
+        "name": "机器人用户名",
+        "action": "match",
+        "pattern": "t\\.me/([^/]+)\\?start=([A-Za-z0-9_-]+)",
+        "text": "link",
+        "index": 1
+      },
+      {
+        "name": "匹配组",
+        "action": "match",
+        "pattern": "t\\.me/([^/?]+)$",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "rule": [
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "joinchat"
+          }
+        ],
+        "rule_text": "tg://join?invite=【邀请码】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "\\+"
+          }
+        ],
+        "rule_text": "tg://join?invite=【邀请码】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "start="
+          }
+        ],
+        "rule_text": "tg://resolve?domain=【机器人用户名】&start=【机器人参数】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "joinchat|\\+|start="
+          }
+        ],
+        "rule_text": "tg://resolve?domain=【匹配组】"
+      }
+    ]
+  },
+  {
+    "name": "tvbox",
+    "tigger": [
+      "cloud\\.189\\.cn",
+      "pan\\.quark\\.cn"
+    ],
+    "type": "intent",
+    "check": "com.fongmi.android.tv",
+    "rule": [
+      {
+        "rule_text": "intent:#Intent;launchFlags=0x10000000;component=com.fongmi.android.tv/.ui.activity.VideoActivity;S.id=【link】;S.key=push_agent;S.name=【link】;B.collect=false;B.download=false;end"
+      }
+    ]
+  },
+  {
+    "name": "YouTube",
+    "tigger": [
+      "youtube\\.com",
+      "youto\\.be"
+    ],
+    "type": "pkg",
+    "pkg": "com.google.android.youtube"
+  },
+  {
+    "name": "京东",
+    "tigger": [
+      "[/.]3\\.cn",
+      "[/.]jd\\.com"
+    ],
+    "type": "url",
+    "check": "com.jingdong.app.mall",
+    "rule": [
+      {
+        "rule_text": "openapp.jdmobile://virtual?params={'category':'jump','des':'m','url':'【link】'}"
+      }
+    ]
+  },
+  {
+    "name": "哔哩哔哩",
+    "tigger": [
+      "bilibili\\.com",
+      "b23\\.tv",
+      "bilibili\\.cn",
+      "bilibili\\.tv",
+      "bili22\\.cn",
+      "bili23\\.cn",
+      "bili33\\.cn",
+      "m\\.acg\\.tv",
+      "bili2233\\.cn",
+      "bilibili\\.smgbb\\.cn"
+    ],
+    "type": "pkg",
+    "pkg": "tv.danmaku.bili"
+  },
+  {
+    "name": "夸克",
+    "tigger": [
+      "pan\\.quark\\.cn"
+    ],
+    "type": "url",
+    "check": "com.quark.browser",
+    "rule": [
+      {
+        "rule_text": "qklink://www.uc.cn/b20b84fd735a8dd3f7541129bacc4e9a?action=open_url&url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "小红书",
+    "tigger": [
+      "xhslink\\.com",
+      "xiaohongshu\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.xingin.xhs",
+    "activityname": "com.xingin.xhs.routers.RouterPageActivity"
+  },
+  {
+    "name": "库街区",
+    "tigger": [
+      "kurobbs\\.com"
+    ],
+    "type": "url",
+    "check": "com.kurogame.kjq",
+    "Custom_variable": [
+      {
+        "name": "postid",
+        "pattern": "\\?postId=(.*)",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "rule": [
+      {
+        "rule_text": "kjq://home/post/postDetail?postId=【postid】"
+      }
+    ]
+  },
+  {
+    "name": "快手",
+    "tigger": [
+      "kuaishou\\.com"
+    ],
+    "type": "url",
+    "check": "com.smile.gifmaker",
+    "rule": [
+      {
+        "rule_text": "kwai://webview?url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "抖音",
+    "tigger": [
+      "douyin\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.ss.android.ugc.aweme"
+  },
+  {
+    "name": "拼多多",
+    "tigger": [
+      "yangkeduo\\.com",
+      "[/.]y4n\\.cn",
+      "srgnnmsrg\\.com",
+      "pinduoduo\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.xunmeng.pinduoduo",
+    "activityname": "com.xunmeng.pinduoduo.ui.activity.MainFrameActivity"
+  },
+  {
+    "name": "新浪微博",
+    "tigger": [
+      "weibo\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.sina.weibo"
+  },
+  {
+    "name": "淘宝",
+    "tigger": [
+      "[/.]tb\\.cn"
+    ],
+    "type": "url",
+    "check": "com.taobao.taobao",
+    "topcondition": {
+      "condition": [
+        {
+          "condition_type": "contains",
+          "condition_text": "input",
+          "condition_pattern": "淘宝"
+        }
+      ],
+      "many_condition_tactic": "Any"
+    },
+    "rule": [
+      {
+        "rule_text": "tbopen://m.taobao.com/tbopen/index.html?h5Url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "百度网盘",
+    "tigger": [
+      "pan\\.baidu\\.com"
+    ],
+    "type": "url",
+    "check": "com.baidu.netdisk",
+    "Custom_variable": [
+      {
+        "name": "dplink",
+        "pattern": "\\/1(.*)",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "rule": [
+      {
+        "condition": [
+          {
+            "condition_type": "withcode"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "bdnetdisk://n/action.SHARE_LINK?m_n_v=8.3.0&surl=【dplink】&pwd=【code】"
+      },
+      {
+        "rule_text": "bdnetdisk://n/action.SHARE_LINK?m_n_v=8.3.0&surl=【dplink】"
+      }
+    ]
+  },
+  {
+    "name": "百度贴吧",
+    "tigger": [
+      "tieba\\.baidu\\.com"
+    ],
+    "type": "url",
+    "Custom_variable": [
+      {
+        "name": "tid",
+        "pattern": "\\/p\\/(.*?)(\\?|$)",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "check": "com.baidu.tieba",
+    "rule": [
+      {
+        "rule_text": "com.baidu.tieba://unidispatch/pb?tid=【tid】"
+      }
+    ]
+  },
+  {
+    "name": "知乎",
+    "tigger": [
+      "zhihu\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.zhihu.android"
+  },
+  {
+    "name": "米游社",
+    "tigger": [
+      "miyoushe\\.com"
+    ],
+    "type": "url",
+    "check": "com.mihoyo.hyperion",
+    "rule": [
+      {
+        "rule_text": "mihoyobbs://webview?link=【link】"
+      }
+    ]
+  },
+  {
+    "name": "美团",
+    "tigger": [
+      "dpurl\\.cn"
+    ],
+    "type": "url",
+    "check": "com.sankuai.meituan",
+    "rule": [
+      {
+        "rule_text": "imeituan://www.meituan.com/web?notitlebar=1&url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "美团外卖",
+    "tigger": [
+      "dpurl\\.cn"
+    ],
+    "type": "url",
+    "check": "com.sankuai.meituan.takeoutnew",
+    "rule": [
+      {
+        "rule_text": "meituanwaimai://waimai.meituan.com/browser?inner_url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "酷安",
+    "clearClipboard": true,
+    "tigger": [
+      "coolapk\\.com"
+    ],
+    "type": "pkg",
+    "pkg": "com.coolapk.market"
+  },
+  {
+    "name": "闲鱼",
+    "tigger": [
+      "[/.]tb\\.cn"
+    ],
+    "type": "url",
+    "check": "com.taobao.idlefish",
+    "topcondition": {
+      "condition": [
+        {
+          "condition_type": "contains",
+          "condition_text": "input",
+          "condition_pattern": "闲鱼"
+        }
+      ],
+      "many_condition_tactic": "Any"
+    },
+    "rule": [
+      {
+        "rule_text": "fleamarket://2.taobao.com/onepiece?h5Url=【link】"
+      }
+    ]
+  },
+  {
+    "name": "阿里云盘",
+    "type": "url",
+    "tigger": [
+      "alipan\\.com"
+    ],
+    "check": "com.alicloud.databox",
+    "Custom_variable": [
+      {
+        "name": "shareid",
+        "pattern": "\\/[st]\\/(.*)",
+        "text": "link",
+        "index": 1
+      }
+    ],
+    "rule": [
+      {
+        "condition": [
+          {
+            "condition_type": "withcode"
+          },
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "\\/s\\/"
+          },
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "\\/t\\/"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "smartdrive://share/browse?shareId=【shareid】&sharePwd=【code】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "withcode"
+          },
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "\\/s\\/"
+          },
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "\\/t\\/"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "smartdrive://friendshare/browse?shareId=【shareid】&sharePwd=【code】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "\\/s\\/"
+          },
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "\\/t\\/"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "smartdrive://share/browse?shareId=【shareid】"
+      },
+      {
+        "condition": [
+          {
+            "condition_type": "notcontains",
+            "condition_text": "link",
+            "condition_pattern": "\\/s\\/"
+          },
+          {
+            "condition_type": "contains",
+            "condition_text": "link",
+            "condition_pattern": "\\/t\\/"
+          }
+        ],
+        "many_condition_tactic": "All",
+        "rule_text": "smartdrive://friendshare/browse?shareId=【shareid】"
+      },
+      {
+        "rule_text": "smartdrive://share/browse?shareId=【shareid】"
+      }
+    ]
+  }
+]
