@@ -261,6 +261,27 @@ var input = (function () {
         return unresolved(v) ? "" : v;
     }
 
+    /**
+     * 取串结果 + **诊断日志**。
+     *
+     * ⚠️ 这条日志是 QQ/微信/附加三条路**唯一的排查手段** —— 它们的失败形态
+     *    全都是「日志说触发了，但界面上什么都没弹」，而原因至少有两种：
+     *    ① 取串为空（正则没命中 / 触发器没给 intent_uri）；
+     *    ② 取串成功但 `OpenMain` 里那条**上游**的早退（`Open_With_List.length < 2`
+     *       且标签是 QQ/微信 ⇒ `return 1`，见 `src/core.js`）。
+     *    所以这里把「抠到的链接」与「原始 intent_uri」一起打出来。
+     */
+    function extracted(tag, value, raw) {
+        var head = (typeof value === "string" && value !== "") ? value.slice(0, 160) : "";
+        VFLOW_ADAPTER.log("输入提取（" + tag + "）：" + (head === "" ? "**空**" : head));
+        if (head === "") {
+            // 没抠到时把原始串打出来 —— 设计/修正正则要靠它
+            VFLOW_ADAPTER.log("  原始 " + tag + " 载荷：" +
+                (typeof raw === "string" ? raw.slice(0, 400) : String(raw)));
+        }
+        return value;
+    }
+
     if (typeof inputs !== "undefined" && inputs !== null) {
         // ① 点击回传 —— **最先判**：它形态明确（`vflowfc://click?…`），
         //    且要被 core.js 的顶层分派认出来（不能被当成分享文案去识别链接）。
@@ -269,13 +290,16 @@ var input = (function () {
 
         // ② 按标签分派（一次执行只命中一个触发器，其余全是 `{{{...}}}` ⇒ pick 成空）
         if (tiggerTag === "QQ") {
-            return vflowExtractIntentUrl(pick(inputs.qq_intent_uri), /S\.url=(.*?);/);
+            var qqRaw = pick(inputs.qq_intent_uri);
+            return extracted("QQ", vflowExtractIntentUrl(qqRaw, /S\.url=(.*?);/), qqRaw);
         }
         if (tiggerTag === "微信") {
-            return vflowExtractIntentUrl(pick(inputs.wechat_intent_uri), /S\.rawUrl=(.*?);/);
+            var wxRaw = pick(inputs.wechat_intent_uri);
+            return extracted("微信", vflowExtractIntentUrl(wxRaw, /S\.rawUrl=(.*?);/), wxRaw);
         }
         if (tiggerTag === "附加") {
-            return vflowExtractExtraUrl(pick(inputs.extra_extras_json));
+            var exRaw = pick(inputs.extra_extras_json);
+            return extracted("附加", vflowExtractExtraUrl(exRaw), exRaw);
         }
 
         // ③ 其余（剪切板 / 选中）—— 触发器输出就是文本本身
@@ -3047,11 +3071,23 @@ function OpenMain(AllLinks, showfloat) {
         return 1;
     }
     var Open_With_List = matchRules(link, false);
+    // ⚠️ 这条日志是「日志说触发了但没提示」的主要排查依据：`matchRules` 的结果
+    //    是「能打开这个链接的应用列表」，**条数直接决定后面弹什么**。
+    console.log("流体云：OpenMain 匹配到 " + Open_With_List.length + " 个可打开的应用");
     if (!manylink && (Open_With_List.length < 2 || getForegroundAppPackageName() != defaultBrowser) &&
         isKeyInOblist(Open_With_List, "pkg", getForegroundAppPackageName())) {
+        console.log("流体云：前台应用在可打开列表里 ⇒ 按上游行为**不弹提示**");
         return 1;
     }
-    if (Open_With_List.length < 2 && ["QQ", "微信"].includes(tiggerTag)) return 1;
+    if (Open_With_List.length < 2 && ["QQ", "微信"].includes(tiggerTag)) {
+        // ⚠️ 这是**上游原有**的静默早退（不是我们加的）：QQ / 微信 这两条路
+        //    「能打开这个链接的应用 < 2 个」时**直接什么都不弹**。
+        //    它正是「日志说触发了，但界面上没反应」的最常见原因之一，
+        //    所以这里补一条日志 —— 否则用户完全无从判断。
+        console.log("流体云：识别到链接，但可打开它的应用只有 " + Open_With_List.length +
+            " 个（标签「" + tiggerTag + "」要求 ≥2）⇒ 按上游行为**不弹提示**");
+        return 1;
+    }
     var DialogBoxOption = [];
     for (var i = 0; i < Open_With_List.length; i++) {
         DialogBoxOption.push({
@@ -3114,6 +3150,8 @@ function OpenMain(AllLinks, showfloat) {
     }
     var openWith;
     var Fluid_Cloud_choose_result = (manylink || !showfloat) ? "choose" : showFloatingPrompt(Fluid_Cloud_Message);
+    console.log("流体云：要弹提示了（choose_result=" + Fluid_Cloud_choose_result +
+        "，多链接=" + manylink + "，showfloat=" + showfloat + "）");
     if (Fluid_Cloud_choose_result === "choose" && (tiggerTag != "附加" || (tiggerTag == "附加" && extra_default_action == "询问"))) {
         var DialogBoxResult = showOptionsDialog(DialogBoxOption, "打开方式(可滚动)");
         if (!["取消", "复制链接", "其他应用打开", "选择应用打开", "重新识别"].includes(DialogBoxResult)) {
@@ -3320,6 +3358,10 @@ if (VFLOW_CLICK_ACTION == "click") {
     }
     var RealDefaultBrowser = getDefaultBrowserPackageName(context);
     var LinkIdentified = RecognitionMain(input);
+    // ⚠️ 识别链路的第一手证据：标签 + 识别到的链接数。
+    //    「日志说触发了但没提示」时，这一条能区分「没识别出链接」与「识别出来了但没弹」。
+    console.log("流体云：标签「" + tiggerTag + "」识别到 " + LinkIdentified.length + " 条链接" +
+        (LinkIdentified.length > 0 ? "：" + LinkIdentified.slice(0, 3).join(" | ") : ""));
     if (CopiedText != false && LinkIdentified.length == 1 && LinkIdentified[0] == CopiedText) {
         RecordCopiedText(false);
     } else {

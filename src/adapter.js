@@ -251,6 +251,27 @@ var input = (function () {
         return unresolved(v) ? "" : v;
     }
 
+    /**
+     * 取串结果 + **诊断日志**。
+     *
+     * ⚠️ 这条日志是 QQ/微信/附加三条路**唯一的排查手段** —— 它们的失败形态
+     *    全都是「日志说触发了，但界面上什么都没弹」，而原因至少有两种：
+     *    ① 取串为空（正则没命中 / 触发器没给 intent_uri）；
+     *    ② 取串成功但 `OpenMain` 里那条**上游**的早退（`Open_With_List.length < 2`
+     *       且标签是 QQ/微信 ⇒ `return 1`，见 `src/core.js`）。
+     *    所以这里把「抠到的链接」与「原始 intent_uri」一起打出来。
+     */
+    function extracted(tag, value, raw) {
+        var head = (typeof value === "string" && value !== "") ? value.slice(0, 160) : "";
+        VFLOW_ADAPTER.log("输入提取（" + tag + "）：" + (head === "" ? "**空**" : head));
+        if (head === "") {
+            // 没抠到时把原始串打出来 —— 设计/修正正则要靠它
+            VFLOW_ADAPTER.log("  原始 " + tag + " 载荷：" +
+                (typeof raw === "string" ? raw.slice(0, 400) : String(raw)));
+        }
+        return value;
+    }
+
     if (typeof inputs !== "undefined" && inputs !== null) {
         // ① 点击回传 —— **最先判**：它形态明确（`vflowfc://click?…`），
         //    且要被 core.js 的顶层分派认出来（不能被当成分享文案去识别链接）。
@@ -259,13 +280,16 @@ var input = (function () {
 
         // ② 按标签分派（一次执行只命中一个触发器，其余全是 `{{{...}}}` ⇒ pick 成空）
         if (tiggerTag === "QQ") {
-            return vflowExtractIntentUrl(pick(inputs.qq_intent_uri), /S\.url=(.*?);/);
+            var qqRaw = pick(inputs.qq_intent_uri);
+            return extracted("QQ", vflowExtractIntentUrl(qqRaw, /S\.url=(.*?);/), qqRaw);
         }
         if (tiggerTag === "微信") {
-            return vflowExtractIntentUrl(pick(inputs.wechat_intent_uri), /S\.rawUrl=(.*?);/);
+            var wxRaw = pick(inputs.wechat_intent_uri);
+            return extracted("微信", vflowExtractIntentUrl(wxRaw, /S\.rawUrl=(.*?);/), wxRaw);
         }
         if (tiggerTag === "附加") {
-            return vflowExtractExtraUrl(pick(inputs.extra_extras_json));
+            var exRaw = pick(inputs.extra_extras_json);
+            return extracted("附加", vflowExtractExtraUrl(exRaw), exRaw);
         }
 
         // ③ 其余（剪切板 / 选中）—— 触发器输出就是文本本身

@@ -2519,11 +2519,23 @@ function OpenMain(AllLinks, showfloat) {
         return 1;
     }
     var Open_With_List = matchRules(link, false);
+    // ⚠️ 这条日志是「日志说触发了但没提示」的主要排查依据：`matchRules` 的结果
+    //    是「能打开这个链接的应用列表」，**条数直接决定后面弹什么**。
+    console.log("流体云：OpenMain 匹配到 " + Open_With_List.length + " 个可打开的应用");
     if (!manylink && (Open_With_List.length < 2 || getForegroundAppPackageName() != defaultBrowser) &&
         isKeyInOblist(Open_With_List, "pkg", getForegroundAppPackageName())) {
+        console.log("流体云：前台应用在可打开列表里 ⇒ 按上游行为**不弹提示**");
         return 1;
     }
-    if (Open_With_List.length < 2 && ["QQ", "微信"].includes(tiggerTag)) return 1;
+    if (Open_With_List.length < 2 && ["QQ", "微信"].includes(tiggerTag)) {
+        // ⚠️ 这是**上游原有**的静默早退（不是我们加的）：QQ / 微信 这两条路
+        //    「能打开这个链接的应用 < 2 个」时**直接什么都不弹**。
+        //    它正是「日志说触发了，但界面上没反应」的最常见原因之一，
+        //    所以这里补一条日志 —— 否则用户完全无从判断。
+        console.log("流体云：识别到链接，但可打开它的应用只有 " + Open_With_List.length +
+            " 个（标签「" + tiggerTag + "」要求 ≥2）⇒ 按上游行为**不弹提示**");
+        return 1;
+    }
     var DialogBoxOption = [];
     for (var i = 0; i < Open_With_List.length; i++) {
         DialogBoxOption.push({
@@ -2586,6 +2598,8 @@ function OpenMain(AllLinks, showfloat) {
     }
     var openWith;
     var Fluid_Cloud_choose_result = (manylink || !showfloat) ? "choose" : showFloatingPrompt(Fluid_Cloud_Message);
+    console.log("流体云：要弹提示了（choose_result=" + Fluid_Cloud_choose_result +
+        "，多链接=" + manylink + "，showfloat=" + showfloat + "）");
     if (Fluid_Cloud_choose_result === "choose" && (tiggerTag != "附加" || (tiggerTag == "附加" && extra_default_action == "询问"))) {
         var DialogBoxResult = showOptionsDialog(DialogBoxOption, "打开方式(可滚动)");
         if (!["取消", "复制链接", "其他应用打开", "选择应用打开", "重新识别"].includes(DialogBoxResult)) {
@@ -2792,6 +2806,10 @@ if (VFLOW_CLICK_ACTION == "click") {
     }
     var RealDefaultBrowser = getDefaultBrowserPackageName(context);
     var LinkIdentified = RecognitionMain(input);
+    // ⚠️ 识别链路的第一手证据：标签 + 识别到的链接数。
+    //    「日志说触发了但没提示」时，这一条能区分「没识别出链接」与「识别出来了但没弹」。
+    console.log("流体云：标签「" + tiggerTag + "」识别到 " + LinkIdentified.length + " 条链接" +
+        (LinkIdentified.length > 0 ? "：" + LinkIdentified.slice(0, 3).join(" | ") : ""));
     if (CopiedText != false && LinkIdentified.length == 1 && LinkIdentified[0] == CopiedText) {
         RecordCopiedText(false);
     } else {
