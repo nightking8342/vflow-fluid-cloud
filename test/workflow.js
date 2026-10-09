@@ -58,15 +58,72 @@ module.exports = function registerWorkflowChecks({ test, assert, assertEq }) {
         assertEq(steps[0].id, 'fluid_js_main', '步骤 id 变了');
     });
 
-    test('⭐ 恰好三个触发器：剪贴板 + 广播 + 手动', () => {
+    test('⭐ 恰好六个触发器：剪切板 / 点击 / 设置 / QQ / 微信 / 附加', () => {
         const triggers = doc().triggers || [];
         assertEq(triggers.map((t) => t.moduleId).sort(),
-            ['vflow.trigger.broadcast', 'vflow.trigger.clipboard', 'vflow.trigger.manual'],
-            '触发器集合变了 —— 三条触发路各一个，少一个就少一条触发路');
+            ['vflow.trigger.activity_changed', 'vflow.trigger.activity_changed',
+                'vflow.trigger.broadcast', 'vflow.trigger.broadcast',
+                'vflow.trigger.clipboard', 'vflow.trigger.manual'],
+            '触发器集合变了 —— 上游 5 条触发源 + 1 条点击回传，少一个就少一条触发路');
         // ⚠️ 触发器 id 被 `inputs` 引用 ⇒ 必须是固定值，不能交给服务端生成
         assertEq(triggers.map((t) => t.id).sort(),
-            ['fluid_click_broadcast', 'fluid_trigger_clipboard', 'fluid_trigger_manual'],
+            ['fluid_click_broadcast', 'fluid_trigger_clipboard', 'fluid_trigger_extra',
+                'fluid_trigger_manual', 'fluid_trigger_qq', 'fluid_trigger_wechat'],
             '触发器 id 变了 —— inputs 里的引用会解析不到（静默走空）');
+    });
+
+    test('⭐ 标签集合与 adapter.js 的分派逐字一致（剪切板/QQ/微信/附加/设置）', () => {
+        // ⚠️⚠️ 标签是「脚本侧怎么分派」的唯一依据（`tiggerTag`）。它与
+        //    `src/adapter.js` 里那串字面量必须逐字对上 —— 差一个字就是**静默**：
+        //    脚本走 else 分支，拿 intent_uri 当分享文案去识别 ⇒ 什么都识别不出。
+        const labels = (doc().triggers || []).map((t) => t.parameters.__trigger_label).sort();
+        // ⚠️ 排序按 **UTF-16 码点**（`Array#sort` 的默认序），不是拼音/笔画。
+        //    写死这个顺序是为了让「加了新触发器忘了同步」立刻变红。
+        assertEq(labels, ['QQ', '剪切板', '微信', '点击', '设置', '附加'],
+            '触发器标签集合变了');
+        const adapter = fs.readFileSync(path.join(ROOT, 'src', 'adapter.js'), 'utf8');
+        for (const tag of ['QQ', '微信', '附加']) {
+            assert(adapter.includes(`tiggerTag === "${tag}"`),
+                `adapter.js 里没有对标签「${tag}」的分派`);
+        }
+    });
+
+    test('⭐ QQ / 微信用 activity_changed + 类名精确匹配（上游那两个 Activity）', () => {
+        const byTag = {};
+        for (const t of doc().triggers || []) byTag[t.parameters.__trigger_label] = t;
+
+        for (const [tag, pkg, cls] of [
+            ['QQ', 'com.tencent.mobileqq', 'com.tencent.mobileqq.activity.QQBrowserActivity'],
+            ['微信', 'com.tencent.mm', 'com.tencent.mm.plugin.webview.ui.tools.MMWebViewUI'],
+        ]) {
+            const t = byTag[tag];
+            assert(t, `没有标签「${tag}」的触发器`);
+            assertEq(t.moduleId, 'vflow.trigger.activity_changed', `${tag} 的模块不对`);
+            // ⚠️ 必须是 **exact**：上游监听的是**特定 Activity**，用 contains 会把
+            //    QQ/微信里其它页面一起收进来（那些页面没有 S.url=，白跑一次识别）。
+            assertEq(t.parameters.match_mode, 'exact', `${tag} 的 match_mode 必须是 exact`);
+            assertEq(t.parameters.class_filter, cls, `${tag} 的类名变了`);
+            assertEq(t.parameters.package_filter, pkg, `${tag} 的包名变了`);
+            // ⚠️ 冷却 0 是有意的：这两个 Activity 一进一出就会 resume 一次，
+            //    但**分享链接只发一次**，加冷却反而会吞掉紧接着的第二次分享。
+            //    （与上游一致：上游没有冷却概念，每条 fact 都跑。）
+            assertEq(t.parameters.cooldown_ms, 0.0, `${tag} 的冷却不该非 0`);
+        }
+    });
+
+    test('⭐ 附加用广播 + 上游那个 action（外部插件投递 URL）', () => {
+        const extra = (doc().triggers || [])
+            .find((t) => t.parameters.__trigger_label === '附加');
+        assert(extra, '没有标签「附加」的触发器');
+        assertEq(extra.moduleId, 'vflow.trigger.broadcast', '附加的模块不对');
+        assertEq(extra.parameters.actions, ['com.nyehueh.fluidcloud.ACTION_URL_RECEIVED'],
+            'action 变了 —— 必须与外部插件发的那个逐字一致');
+        // ⚠️ 与「点击」那条不能撞：撞了会把点击回传当成附加链接去识别。
+        const click = (doc().triggers || [])
+            .find((t) => t.parameters.__trigger_label === '点击');
+        assert(click, '没有标签「点击」的触发器');
+        assert(!click.parameters.actions.some((a) => extra.parameters.actions.includes(a)),
+            '「点击」与「附加」的 action 撞车了');
     });
 
     test('⭐ 手动触发器带标签「设置」，且与 core.js 的常量逐字一致', () => {
@@ -102,10 +159,11 @@ module.exports = function registerWorkflowChecks({ test, assert, assertEq }) {
             '工作流里的 script 与 src/bootstrap.js 不一致 —— 跑 `python tools/build-workflow.py` 刷新');
     });
 
-    test('⭐ inputs 三键，键名与 adapter.js 读的逐字一致', () => {
+    test('⭐ inputs 六键，键名与 adapter.js 读的逐字一致', () => {
         const inputs = doc().steps[0].parameters.inputs || {};
         assertEq(Object.keys(inputs).sort(),
-            ['click_uri', 'clipboard_text', 'trigger_label'],
+            ['click_uri', 'clipboard_text', 'extra_extras_json', 'qq_intent_uri',
+                'trigger_label', 'wechat_intent_uri'],
             'inputs 的键变了 —— adapter.js 的 input / tiggerTag 会读不到（静默走空）');
         // ⚠️ 值必须引用**存在的**触发器 id（上面已断言 id 集合，这里断引用指向它们）。
         //    ⚠️ 例外：`trigger_label` 是**命名变量** `{{vars.__trigger_label}}`，

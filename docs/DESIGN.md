@@ -78,6 +78,10 @@
 ⚠️ 3 / 4 两条不是「通用 Activity 监听」，而是**针对特定 Activity 类名的精确匹配**——
 这意味着它们**可以用 vFlow 的 `vflow.trigger.activity_changed` 的 `class_filter` 精确对应**（§2.1）。
 
+⚠️ **取串这一步我们放在脚本里**（`src/adapter.js` 的输入提取层），不在工作流动作里 ——
+vFlow 的触发器输出是**结构化**的（`intent_uri` / `extras_json`），
+工作流侧没有「跑正则 / 解析 JSON 取键」的现成积木。逐条见 §2.1.1。
+
 ### 1.3 核心逻辑分层
 
 ```
@@ -145,6 +149,31 @@
 
 > ⚠️ **`activity_changed` 依赖 Xposed 通道**（`ActivityChangedTriggerModule.kt:65` 声明 `XPOSED_HOOK` 权限）。
 > 本机设备已装 LSPosed 并验证过该通道（FORK.md 记有 P3/P4 真机结论），**前提成立**。
+>
+> ⚠️⚠️ **但权限缺失时 vFlow 的行为不是「少一条触发路」，而是把整个工作流禁用**：
+> `TriggerService.recoverWorkflowPermissionsAndApplyState` 在权限仍缺时
+> `saveWorkflow(isEnabled = false)`（`TriggerService.kt:349-357`）。而
+> `PermissionManager.getMissingPermissions` 收的是 `workflow.allSteps`
+> （= `triggers + steps`，`Workflow.kt:53`）⇒ **挂上 QQ/微信触发器就等于给整个工作流
+> 加了一条 Xposed 前置条件**。⇒ 未装 LSPosed / 没勾「系统框架」时，
+> 表现是「**剪切板也不响了**」。
+>
+> ⚠️ **排除某条触发源要改 `tools/build-workflow.py` 的 `TRIGGERS` 把它删掉**，
+> 不能靠 `isDisabled: true` —— 那个字段只在 `WorkflowExecutor` 跑 `steps` 时生效
+> （`WorkflowExecutor.kt:588`），触发器注册那条路（`Workflow.autoTriggerSteps()`，
+> `Workflow.kt:68-70`）**不过滤**它。
+
+### 2.1.1 实施状态（2026-10-09）
+
+| 触发源 | 是否已落地到 `workflow/fluid-cloud.json` |
+|---|---|
+| 剪切板 | ✅ 已落地并真机跑通 |
+| 点击回传（广播） | ✅ 已落地并真机跑通 |
+| 设置（手动） | ✅ 已落地 |
+| **QQ**（`activity_changed`） | ⚠️ **已配置，未真机验证**（需 LSPosed） |
+| **微信**（`activity_changed`） | ⚠️ **已配置，未真机验证**（需 LSPosed） |
+| **附加**（广播） | ⚠️ **已配置，未真机验证**（需装附加插件） |
+| 选中文本菜单 | ❌ 不做（§4.4） |
 
 ### 2.2 动作层对照
 
@@ -1341,7 +1370,8 @@ if (!cancelCurrent) {
 |---|---|---|
 | **0** | ⭐ **把「点击之后做什么」交给工作流（广播 → vFlow 广播触发器）** | 见 §4.6 出路 ①。**恢复超级岛形态的路径**，且**不用改 vFlow**、顺带解决「阻塞 3 秒」。⚠️ 多链接/打开方式那类**选择**要一并搬进工作流 |
 | **0b** | （可选，根治）**补上 `ContextFactory.createClassLoader`（`dx` 那条链）** | 见 §4.6 出路 ②。做完 0 之后**优先级下降**；它是本批**唯一要改 vFlow 核心代码**的项 |
-| 7 | QQ / 微信触发源 | `vflow.trigger.activity_changed` + `class_filter` 精确匹配；脚本里改用 `intent_uri` 抠 `S.url=` / `S.rawUrl=` |
+| 7 | ~~QQ / 微信触发源~~ | ✅ **已配置**（2026-10-09）：`vflow.trigger.activity_changed` + `class_filter` 精确匹配；取串在 `src/adapter.js` 的 `vflowExtractIntentUrl`（照上游正则）。⚠️ **真机未验**（需 LSPosed 勾「系统框架」） |
+| 7a | ~~附加插件触发源~~ | ✅ **已配置**（2026-10-09）：`vflow.trigger.broadcast` + 上游那个 action；取串 `vflowExtractExtraUrl`（`extras_json` 的 `url` 键）。⚠️ **真机未验**（需装 `com.nyehueh.fluidcloud`） |
 | 8 | 附加插件广播触发源 | `vflow.trigger.broadcast` + `extras_json`；⚠️ 需确认附加插件（`com.nyehueh.fluidcloud`）是否要改，或改用 vFlow 自己的广播 |
 | ~~9~~ | ~~小窗打开~~ | ✅ **已具备，不必做** —— 上游原样的 `ActivityOptions` 在 JS 里直接可用（§4.2，2026-10-08 真机实证）。原计划的 `service call activity_task 138` **不需要** |
 | 10 | 选项列表对话框 | 用 `vflow.logic.list.choose` 替代自绘 WindowManager View |

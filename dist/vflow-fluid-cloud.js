@@ -137,42 +137,10 @@ var VFLOW_ADAPTER = (function () {
 //    漏了会在运行时报 `ReferenceError: "input" is not defined`。
 // ---------------------------------------------------------------------------
 
-/** 本次触发的输入文本（剪贴板内容 / 广播 `data_uri` / QQ·微信 Intent 里抠出的串）。 */
-var input = (function () {
-    /**
-     * ⚠️⚠️ **未命中的触发器输出不是空串，而是 `{{{stepId.outputId}}}`（三个花括号）。**
-     *
-     * 这是 vFlow `VariableResolver` 对「解析不到」的回退
-     * （`VariableResolver.kt:133`：`VObjectFactory.from("{${segment.rawExpression}}")`，
-     * 而 `rawExpression` 本身已含 `{{ }}` ⇒ 拼出来是三层）。
-     *
-     * **一个工作流挂多个触发器时，未命中的那些输出全都会是这个形态**（实测确认）。
-     * 直接当值用 ⇒ 脚本会拿这串去识别链接 ⇒ **弹一个无意义的岛**，而且**不报错**。
-     * ⇒ 必须显式认出来、当空处理。
-     */
-    function unresolved(v) {
-        return typeof v !== "string" || v === "" || v.indexOf("{{{") === 0;
-    }
-
-    if (typeof inputs !== "undefined" && inputs !== null) {
-        // 两个触发器各一路（键与值见 workflow/fluid-cloud.json 的 inputs，
-        // 由 tools/build-workflow.py 刷新）。一次执行只命中一个，
-        // 另一个必是 `{{{...}}}` ⇒ 这里谁有真值用谁。
-        // ⚠️ 点击 URI 排前面：它形态明确（`vflowfc://click?…`），且要被顶层分派认出来。
-        if (!unresolved(inputs.click_uri)) return inputs.click_uri;
-        if (!unresolved(inputs.clipboard_text)) return inputs.clipboard_text;
-    }
-    if (typeof vars !== "undefined" && vars !== null) {
-        // 触发器输出经 `{{step.output}}` 展开后由工作流传进来时，可能落在命名变量里
-        if (typeof vars.input_text === "string") return vars.input_text;
-    }
-    return "";
-})();
-
 /**
  * 触发器标签 —— core.js 用它判断「本次是哪条触发源」。
  *
- * 取值：`剪切板` / `QQ` / `微信` / `附加` / **`设置`**（与原脚本的 tag 一致）。
+ * 取值：`剪切板` / `选中` / `QQ` / `微信` / `附加` / **`设置`**（与原脚本的 tag 一致）。
  *
  * ⚠️ `设置` 不是输入源，是**手动触发器**的标签：本次执行要弹「设置指令 / 编辑规则」
  *    那个自绘界面（上游「点指令图标 → 执行动作」的 vFlow 版，见 core.js 的顶层分派）。
@@ -181,6 +149,9 @@ var input = (function () {
  *    见 docs/fork/trigger-label-design.md。
  * ⚠️ 空串会让 core.js 的 `["选中","附加"].includes(tiggerTag)` 等判断全部走 false 分支 ——
  *    这是**静默**的（表现为「浮窗不弹」或「走错分支」）⇒ 下面显式记一条日志。
+ *
+ * ⚠️⚠️ **必须在 `input` 之前定义** —— `input` 的提取方式**按标签分派**
+ *    （QQ / 微信 要从 intent_uri 里抠，附加 要解析 extras）。见下。
  */
 var tiggerTag = (function () {
     if (typeof inputs !== "undefined" && inputs !== null && typeof inputs.trigger_label === "string") {
@@ -200,6 +171,123 @@ if (tiggerTag === "") {
     //    表现是「点了执行，什么都没发生」，只有日志能区分是哪种。
     VFLOW_ADAPTER.log("手动触发（标签「设置」）—— 打开设置界面，本次不做链接处理");
 }
+
+// ---------------------------------------------------------------------------
+// 输入文本的「提取层」—— 对应上游工作流里那三个 `ReplaceRegex` / `ExecuteJS` / `ExecuteMVEL`
+//
+// 上游把「从各触发源取串」写在工作流的动作里（见 reference/ShortX-流体云组件3.7…txt
+// 的 SwitchCase 分支）；我们**放在适配层**，因为 vFlow 的触发器输出是**结构化**的
+// （intent_uri / extras_json），取串这一步只能在这边做。
+//
+// | 触发源 | 上游取法 | 我们的取法 |
+// |---|---|---|
+// | 剪切板 | `{clipboardContent}` | `inputs.clipboard_text`（触发器输出，原样） |
+// | 选中   | `{selectedText}` | ⚠️ **vFlow 无对应触发器**（用户已判定不做，DESIGN.md §4.4） |
+// | QQ     | 正则 `/S.url=(.*?);/` | 同一个正则，作用在 `activity_changed` 的 `intent_uri` 上 |
+// | 微信   | 正则 `/S.rawUrl=(.*?);/` | 同上 |
+// | 附加   | `intent.extras["url"]` | `extras_json` 里取 `url` 键 |
+// ---------------------------------------------------------------------------
+
+/**
+ * 从 vFlow 的 `intent_uri` 里抠链接（QQ / 微信）。
+ *
+ * ⚠️ 正则照抄上游（`reference/ShortX-流体云组件3.7…txt` 的 `Case-05133f5c…` /
+ *    `Case-75808f47…`）：**必须 `.*?` 非贪婪**，因为 URI 里 `;` 很常见
+ *    （`S.url=…;S.rawUrl=…;end`），贪婪会把后面所有东西一起吃进去。
+ *
+ * @param {string} intentUri  `ActivityChangedTrigger` 的 `intent_uri` 输出
+ * @param {RegExp} pattern    取哪个键（QQ 用 `S.url=`、微信用 `S.rawUrl=`）
+ * @returns {string} 抠出来的链接；抠不到返回 `""`
+ */
+function vflowExtractIntentUrl(intentUri, pattern) {
+    if (typeof intentUri !== "string" || intentUri === "") return "";
+    var m = intentUri.match(pattern);
+    if (!m || m.length < 2) return "";
+    var raw = m[1];
+    try {
+        // ⚠️ `decodeURIComponent` 对畸形转义（如单独的 `%`）**会抛** ⇒ 必须兜住。
+        //    抛出去的后果是整个脚本崩，而这一条只是「这次没抠到链接」。
+        return decodeURIComponent(raw);
+    } catch (e) {
+        VFLOW_ADAPTER.log("intent 里的 URL 解码失败（原样使用）：" + e);
+        return raw;
+    }
+}
+
+/**
+ * 从广播的 `extras_json` 里取 `url`（「附加」那条路）。
+ *
+ * ⚠️ 上游用的是 MVEL `intent.getExtras().getString("url")`；vFlow 的广播触发器
+ *    给的是 `extras_json`（`BroadcastTriggerModule.kt:225` 的输出）⇒ 这里解析 JSON。
+ * ⚠️ 解析失败 / 没有 `url` 键都返回 `""`（不抛）—— 那是「这次没带链接」，不是异常。
+ */
+function vflowExtractExtraUrl(extrasJson) {
+    if (typeof extrasJson !== "string" || extrasJson === "") return "";
+    try {
+        var obj = JSON.parse(extrasJson);
+        if (obj === null || typeof obj !== "object") return "";
+        var u = obj.url;
+        return (typeof u === "string") ? u : "";
+    } catch (e) {
+        VFLOW_ADAPTER.log("附加插件的 extras 解析失败：" + e);
+        return "";
+    }
+}
+
+/**
+ * 本次触发的输入文本（**按 `tiggerTag` 分派提取**）。
+ *
+ * ⚠️⚠️ 键名必须与 `workflow/fluid-cloud.json` 的 `inputs` **逐字一致**
+ *    （由 `tools/build-workflow.py` 的 `INPUTS` 派生）—— 改一处忘另一处是**静默**的：
+ *    脚本读不到值 ⇒ 拿空串去识别 ⇒ 「复制了链接什么都没发生」。
+ */
+var input = (function () {
+    /**
+     * ⚠️⚠️ **未命中的触发器输出不是空串，而是 `{{{stepId.outputId}}}`（三个花括号）。**
+     *
+     * 这是 vFlow `VariableResolver` 对「解析不到」的回退
+     * （`VariableResolver.kt:133`：`VObjectFactory.from("{${segment.rawExpression}}")`，
+     * 而 `rawExpression` 本身已含 `{{ }}` ⇒ 拼出来是三层）。
+     *
+     * **一个工作流挂多个触发器时，未命中的那些输出全都会是这个形态**（实测确认）。
+     * 直接当值用 ⇒ 脚本会拿这串去识别链接 ⇒ **弹一个无意义的岛**，而且**不报错**。
+     * ⇒ 必须显式认出来、当空处理。
+     */
+    function unresolved(v) {
+        return typeof v !== "string" || v === "" || v.indexOf("{{{") === 0;
+    }
+
+    function pick(v) {
+        return unresolved(v) ? "" : v;
+    }
+
+    if (typeof inputs !== "undefined" && inputs !== null) {
+        // ① 点击回传 —— **最先判**：它形态明确（`vflowfc://click?…`），
+        //    且要被 core.js 的顶层分派认出来（不能被当成分享文案去识别链接）。
+        var click = pick(inputs.click_uri);
+        if (click !== "") return click;
+
+        // ② 按标签分派（一次执行只命中一个触发器，其余全是 `{{{...}}}` ⇒ pick 成空）
+        if (tiggerTag === "QQ") {
+            return vflowExtractIntentUrl(pick(inputs.qq_intent_uri), /S\.url=(.*?);/);
+        }
+        if (tiggerTag === "微信") {
+            return vflowExtractIntentUrl(pick(inputs.wechat_intent_uri), /S\.rawUrl=(.*?);/);
+        }
+        if (tiggerTag === "附加") {
+            return vflowExtractExtraUrl(pick(inputs.extra_extras_json));
+        }
+
+        // ③ 其余（剪切板 / 选中）—— 触发器输出就是文本本身
+        var text = pick(inputs.clipboard_text);
+        if (text !== "") return text;
+    }
+    if (typeof vars !== "undefined" && vars !== null) {
+        // 触发器输出经 `{{step.output}}` 展开后由工作流传进来时，可能落在命名变量里
+        if (typeof vars.input_text === "string") return vars.input_text;
+    }
+    return "";
+})();
 
 /** 调试模式：true 时强制显示浮窗（即使 tiggerTag 是「选中」「附加」）。 */
 var DebugMode = false;

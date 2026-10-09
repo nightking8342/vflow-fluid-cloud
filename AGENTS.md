@@ -154,7 +154,7 @@ diff -r reference/rules src/rules          # 规则库（逐字节相同 = 没�
 ```bash
 npm run build          # 两步全跑：合并规则 → 拼接脚本
 npm run build:workflow # bootstrap.js → workflow/fluid-cloud.json（改了它才要跑）
-npm test               # 离线测试（110 例）
+npm test               # 离线测试（122 例）
 npm run check          # build + 语法检查 + test
 
 # 单独跑某一步（改了什么跑什么）
@@ -217,20 +217,26 @@ adb push version /sdcard/vFlow/fluid-cloud/version
 
 ```
 vFlow 工作流（workflow/fluid-cloud.json，导入即得）
-  ├── 触发器 ① vflow.trigger.clipboard（标签「剪切板」）
+  ├── 触发器 ① vflow.trigger.clipboard（标签「剪切板」）        ← 上游触发源 1
   ├── 触发器 ② vflow.trigger.broadcast（标签「点击」，action …CLICK / scheme vflowfc）
   ├── 触发器 ③ vflow.trigger.manual（标签「设置」）→ 弹上游那三个自绘界面
+  ├── 触发器 ④ vflow.trigger.activity_changed（标签「QQ」，类名精确匹配）  ← 上游触发源 3
+  ├── 触发器 ⑤ vflow.trigger.activity_changed（标签「微信」，类名精确匹配）← 上游触发源 4
+  ├── 触发器 ⑥ vflow.trigger.broadcast（标签「附加」，插件那个 action）   ← 上游触发源 5
   └── 步骤 vflow.system.js
-        ├── script = src/bootstrap.js 的内容（约 2 KB）
-        │     └─ eval(读 /sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js)
-        │           ├─ src/adapter.js（手写：平台桥 + 全局变量 + 自举）
+        ├── script = src/bootstrap.js 的内容（约 21 KB）
+        │     └─ 首次自足（缺产物就拉全套）→ eval(读 /sdcard/vFlow/fluid-cloud/vflow-fluid-cloud.js)
+        │           ├─ src/adapter.js（手写：平台桥 + 全局变量 + **输入提取层** + 自举）
         │           └─ src/core.js   （核心逻辑，就地维护）
-        └── inputs = { click_uri:      "{{fluid_click_broadcast.data_uri}}",
-                       clipboard_text: "{{fluid_trigger_clipboard.text_content}}",
-                       trigger_label:  "{{vars.__trigger_label}}" }
+        └── inputs = { click_uri:         "{{fluid_click_broadcast.data_uri}}",
+                       clipboard_text:    "{{fluid_trigger_clipboard.text_content}}",
+                       qq_intent_uri:     "{{fluid_trigger_qq.intent_uri}}",
+                       wechat_intent_uri: "{{fluid_trigger_wechat.intent_uri}}",
+                       extra_extras_json: "{{fluid_trigger_extra.extras_json}}",
+                       trigger_label:     "{{vars.__trigger_label}}" }
 ```
 
-> ⚠️ 三条触发路跑的是**同一份脚本**，脚本内部靠 `input` / `tiggerTag` 顶层分派
+> ⚠️ 六条触发路跑的是**同一份脚本**，脚本内部靠 `input` / `tiggerTag` 顶层分派
 > （`vflowfc://click?…` → 打开；标签 `设置` → 设置界面；其余 → 识别链路）。
 > 一次执行里**必然有未命中的输出**，而 vFlow 对未命中**不给空串**、
 > 给字面量 `{{{stepId.outputId}}}`（三个花括号）⇒ `adapter.js` 的 `input` 必须认出来当空。
@@ -239,6 +245,32 @@ vFlow 工作流（workflow/fluid-cloud.json，导入即得）
 > ⚠️ 触发器 ③ 是 2026-10-08 加的（手动跑 → 设置界面，`docs/DESIGN.md` §3.4.5）。
 > 加它之后**卡片上的「▶ 执行」按钮会消失**（vFlow 只在「有手动触发器**且没有**自动触发器」
 > 时才画它）⇒ 手动跑改用桌面快捷方式（⋮ →「添加到桌面」）。
+>
+> ⚠️⚠️ **触发器 ④⑤ 要求 Xposed 通道**（`activity_changed` 声明 `XPOSED_HOOK`）。
+> 权限缺失时 vFlow **不报错**，而是把整个工作流 `isEnabled = false` **静默禁用**
+> ⇒ 表现是「**所有**触发源全哑」。⇒ 装上之后必须去 LSPosed 勾「系统框架」作用域
+> 并重启，再回 vFlow 重新启用这个工作流。
+>
+> ⚠️⚠️ **要排除某条触发源，必须改 `tools/build-workflow.py` 的 `TRIGGERS` 把它删掉**
+> （并删 `INPUTS` 里对应的键）—— **不能**靠 `isDisabled: true`：那个字段只在
+> `WorkflowExecutor` 跑 `steps` 时生效（`WorkflowExecutor.kt:588`），而触发器注册走
+> `Workflow.toAutoTriggerSpecs()` → `autoTriggerSteps()`，**不过滤** `isDisabled`
+> （`Workflow.kt:68-70`）⇒ 置 true 只是编辑器里显示成灰的，权限照样要求、触发器照样注册。
+
+### 上游 5 条触发源 → 我们的对应（**输入提取层**）
+
+上游把「从各触发源取串」写在工作流的动作里（`reference/ShortX-流体云组件3.7…txt`
+的 SwitchCase：`ReplaceRegex` / `ExecuteJS` / `ExecuteMVEL`）；我们放在
+`src/adapter.js` —— vFlow 的触发器输出是**结构化**的（`intent_uri` / `extras_json`），
+取串这一步只能在这边做。
+
+| 上游触发源 | tag | vFlow 对应物 | 我们怎么取串 |
+|---|---|---|---|
+| `ClipboardContentChanged` | `剪切板` | `vflow.trigger.clipboard` ✅ | `inputs.clipboard_text`（触发器输出就是文本） |
+| `OnMenuActionTrigger` | `选中` | ❌ **无对应**（用户已判定不做，DESIGN.md §4.4） | — |
+| `ActivityStarted`（QQ） | `QQ` | `vflow.trigger.activity_changed` + 类名精确匹配 ✅ | `intent_uri` 上跑 `/S\.url=(.*?);/` + `decodeURIComponent` |
+| `ActivityStarted`（微信） | `微信` | 同上（换类名）✅ | `intent_uri` 上跑 `/S\.rawUrl=(.*?);/` |
+| `Broadcast`（附加插件） | `附加` | `vflow.trigger.broadcast` + 插件那个 action ✅ | `extras_json` 里取 `url` 键 |
 
 ### 移植时的 5 类改动（**一次性，已落进 `src/core.js`**）
 

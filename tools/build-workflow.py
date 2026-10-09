@@ -68,13 +68,15 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BOOTSTRAP = ROOT / "src" / "bootstrap.js"
 WORKFLOW = ROOT / "workflow" / "fluid-cloud.json"
 
-# `steps[0].parameters.inputs` —— 两个触发器各一路 + 触发器标签。
+# `steps[0].parameters.inputs` —— 每条触发源一路 + 触发器标签。
 #
-# ⚠️ 这三个键是 `src/adapter.js` 的 `input` / `tiggerTag` 读的
-#    （`inputs.click_uri` / `inputs.clipboard_text` / `inputs.trigger_label`），
+# ⚠️ 这些键是 `src/adapter.js` 的 `input` / `tiggerTag` 读的，
 #    改名必须两边一起改，否则脚本读不到 → **静默走空**（表现为「点了没反应」）。
+#    ⚠️ 但**多出来的键是安全的**：未命中的触发器输出一律是 `{{{...}}}`，
+#    `adapter.js` 的 `pick()` 认出来当空 —— 所以「只用剪切板」的设备上，
+#    其余四路恒为空串，不会误触发。
 #
-# ⚠️ 触发器 id（`fluid_click_broadcast` / `fluid_trigger_clipboard`）必须与
+# ⚠️ 触发器 id（`fluid_click_broadcast` / `fluid_trigger_clipboard` / …）必须与
 #    JSON 里 `triggers[].id` **逐字一致** —— 改了一处忘另一处，同样是静默失效。
 #
 # ⚠️ `trigger_label` 写成**规范化后**的 `{{vars.__trigger_label}}`：
@@ -83,16 +85,25 @@ WORKFLOW = ROOT / "workflow" / "fluid-cloud.json"
 INPUTS = {
     "click_uri": "{{fluid_click_broadcast.data_uri}}",
     "clipboard_text": "{{fluid_trigger_clipboard.text_content}}",
+    # QQ / 微信：「activity_changed」的 intent_uri，脚本侧用正则抠 `S.url=` / `S.rawUrl=`
+    # （照上游；见 src/adapter.js 的 vflowExtractIntentUrl）。
+    "qq_intent_uri": "{{fluid_trigger_qq.intent_uri}}",
+    "wechat_intent_uri": "{{fluid_trigger_wechat.intent_uri}}",
+    # 附加：外部插件投递的广播，链接在 extras 的 `url` 键里（脚本侧解析 extras_json）。
+    "extra_extras_json": "{{fluid_trigger_extra.extras_json}}",
     "trigger_label": "{{vars.__trigger_label}}",
 }
 
-# `triggers` —— 三个触发器，**顺序与 id 都固定**（`inputs` 引用它们的 id）。
+# `triggers` —— 六个触发器，**顺序与 id 都固定**（`inputs` 引用它们的 id）。
 #
 # | # | 模块 | 标签 | 作用 |
 # |---|---|---|---|
 # | 1 | `vflow.trigger.clipboard` | `剪切板` | 复制分享文案 → 识别链接 |
 # | 2 | `vflow.trigger.broadcast` | `点击` | 岛/浮窗按钮的回传（§4.6 出路 ①） |
 # | 3 | `vflow.trigger.manual` | `设置` | **手动跑 → 弹「设置指令 / 编辑规则」界面** |
+# | 4 | `vflow.trigger.activity_changed` | `QQ` | QQ 内置浏览器打开 → 从 `intent_uri` 抠 `S.url=` |
+# | 5 | `vflow.trigger.activity_changed` | `微信` | 微信内置浏览器打开 → 从 `intent_uri` 抠 `S.rawUrl=` |
+# | 6 | `vflow.trigger.broadcast` | `附加` | 外部插件（`com.nyehueh.fluidcloud`）投递 URL |
 #
 # ⚠️⚠️ **手动触发器必须是「触发器」，不能是「步骤」。** 在 vFlow 里手动执行时，
 #    `triggerStepId = workflow.manualTrigger()?.id`（`HomeScreen.kt:596` 等 6 处），
@@ -100,12 +111,27 @@ INPUTS = {
 #    ⇒ 写成步骤的话 `[[__trigger_label]]` 恒为**空串**，core.js 拿不到「设置」，
 #    表现是「点了执行，什么都没发生」（**静默**）。
 #
-# ⚠️⚠️ **代价（如实记录）**：加上它之后 `hasAutoTriggers()` 变 true ⇒ 卡片上那个
-#    「▶ 执行」按钮**会消失**（`WorkflowListScreen.kt:943`：`isManualTrigger && !hasAutoTriggers`），
-#    而「5秒后执行」挂在同一个按钮的长按上。⇒ 改用**桌面快捷方式**触发
-#    （⋮ 菜单 →「添加到桌面」，判据是 `hasManualTrigger()`，本改动后可用）。
+# ⚠️⚠️ **代价（如实记录）**：加上手动触发器之后 `hasAutoTriggers()` 变 true ⇒
+#    卡片上那个「▶ 执行」按钮**会消失**（`WorkflowListScreen.kt:943`：
+#    `isManualTrigger && !hasAutoTriggers`），而「5秒后执行」挂在它的长按上。
+#    ⇒ 改用**桌面快捷方式**触发（⋮ 菜单 →「添加到桌面」，判据是 `hasManualTrigger()`）。
 #
-# ⚠️ 标签 `设置` 与 `src/core.js` 的 `VFLOW_MANUAL_LABEL` **必须逐字一致**。
+# ⚠️⚠️ **`activity_changed`（第 4/5 条）要求 Xposed 通道**（模块声明 `XPOSED_HOOK`）。
+#    权限缺失时 vFlow **不会报错**，而是把这个工作流 `isEnabled = false`
+#    **静默禁用**（`TriggerService.recoverWorkflowPermissionsAndApplyState`）⇒
+#    表现是「**所有**触发源全哑」。所以：**装上触发器之后必须去 LSPosed 里勾
+#    「系统框架」作用域并重启**，再回 vFlow 里重新启用这个工作流。
+#
+# ⚠️⚠️ **要排除某条触发源，必须从本表里删掉它**（并同时删 `INPUTS` 里对应的键）——
+#    **不能**靠 `isDisabled: true`：那个字段只在 `WorkflowExecutor` 跑 `steps` 时生效
+#    （`WorkflowExecutor.kt:588`），而触发器注册走 `Workflow.toAutoTriggerSpecs()`
+#    → `autoTriggerSteps()`，那里**不过滤** `isDisabled`（`Workflow.kt:68-70`）。
+#    ⇒ 置 true 只会让它在编辑器里显示成灰的，权限照样要求、触发器照样注册。
+#    ⚠️ 删掉触发器后 `INPUTS` 里那份引用会解析不到 ⇒ 脚本拿到 `{{{...}}}`
+#    ⇒ `adapter.js` 的 `pick()` 当空处理（这正是已有的容错）。
+#
+# ⚠️ 标签 `设置` 与 `src/core.js` 的 `VFLOW_MANUAL_LABEL` **必须逐字一致**；
+#    `QQ` / `微信` / `附加` 与 `src/adapter.js` 的 `tiggerTag` 分派**必须逐字一致**。
 TRIGGERS = [
     {
         "id": "fluid_trigger_clipboard",
@@ -134,6 +160,55 @@ TRIGGERS = [
         "isDisabled": False,
         "moduleId": "vflow.trigger.manual",
         "parameters": {"__trigger_label": "设置"},
+    },
+    {
+        # QQ 内置浏览器（上游 `ActivityStarted` 监听的那个 Activity 类）。
+        # ⚠️ 用**类名精确匹配**（`match_mode: exact`），不是包名 ——
+        #    QQ 里其它 Activity 打开也会进这个触发器，包级匹配会把它们一起收进来。
+        "id": "fluid_trigger_qq",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.activity_changed",
+        "parameters": {
+            "package_filter": "com.tencent.mobileqq",
+            "class_filter": "com.tencent.mobileqq.activity.QQBrowserActivity",
+            "match_mode": "exact",
+            "cooldown_ms": 0.0,
+            "__trigger_label": "QQ",
+        },
+    },
+    {
+        "id": "fluid_trigger_wechat",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.activity_changed",
+        "parameters": {
+            "package_filter": "com.tencent.mm",
+            "class_filter": "com.tencent.mm.plugin.webview.ui.tools.MMWebViewUI",
+            "match_mode": "exact",
+            "cooldown_ms": 0.0,
+            "__trigger_label": "微信",
+        },
+    },
+    {
+        # 外部附加插件（上游 `Broadcast` 监听 `com.nyehueh.fluidcloud.ACTION_URL_RECEIVED`）。
+        # ⚠️ 它注册的是 **EXPORTED** receiver（跨应用广播，`BroadcastTriggerHandler` 的
+        #    注释里有实测：`NOT_EXPORTED` 下 3/3 收不到）⇒ 任意应用都能发这个 action。
+        #    这里保持上游的 action 不变；`data_schemes` 留空（插件是**用 extras 传 url**，
+        #    不是 data URI）—— ⚠️ 但空 scheme 会让「带 data 的 intent」直接 NO_MATCH_DATA，
+        #    见 `BroadcastTriggerModule.kt:52` 那条注释。插件本身不带 data，故无影响。
+        "id": "fluid_trigger_extra",
+        "indentationLevel": 0,
+        "isDisabled": False,
+        "moduleId": "vflow.trigger.broadcast",
+        "parameters": {
+            "actions": ["com.nyehueh.fluidcloud.ACTION_URL_RECEIVED"],
+            "data_schemes": [],
+            "categories": [],
+            "match_mode": "exact",
+            "cooldown_ms": 0.0,
+            "__trigger_label": "附加",
+        },
     },
 ]
 

@@ -50,7 +50,7 @@ python tools/build-workflow.py # 3. bootstrap.js → workflow/fluid-cloud.json�
 ## 测试
 
 ```bash
-npm test          # 等价于 node test/run.js（110 例）
+npm test          # 等价于 node test/run.js（122 例）
 npm run check     # build + 语法检查 + test
 ```
 

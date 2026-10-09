@@ -1013,7 +1013,136 @@ test('package.json 的脚本已跟上架构调整', () => {
 });
 
 // ===========================================================================
-console.log('\n[12] 更新机制（docs/UPDATE.md）');
+console.log('\n[12] 输入提取层（各触发源的取串方式）');
+// ===========================================================================
+
+// ⚠️ 上游把「从各触发源取串」写在工作流的动作里（SwitchCase 的 ReplaceRegex /
+//    ExecuteJS / ExecuteMVEL）；我们放在 `src/adapter.js`（vFlow 的触发器输出是
+//    **结构化**的，取串只能在这边做）。见 `reference/ShortX-流体云组件3.7_超级岛版_.txt`。
+
+test('QQ：从 intent_uri 抠 S.url=（非贪婪，取到第一个 ; 为止）', () => {
+    const { sandbox } = loadMain();
+    const f = sandbox.vflowExtractIntentUrl;
+    // 真实的 `intent.toUri(1)` 形态：`intent:...#Intent;...;S.url=xxx;S.rawUrl=yyy;end`
+    const uri = 'intent://m.q.qq.com/a/s/abc#Intent;scheme=mqqapi;' +
+        'S.url=https%3A%2F%2Fpan.baidu.com%2Fs%2F1AbC;S.rawUrl=https%3A%2F%2Fother%2F;end';
+    assertEq(f(uri, /S\.url=(.*?);/), 'https://pan.baidu.com/s/1AbC',
+        'QQ 的 URL 抠错了（解码 / 非贪婪都在这条上）');
+    // ⚠️ 非贪婪是关键：URI 里 `;` 很常见，贪婪会把后面所有键一起吃进去
+    assert(!f(uri, /S\.url=(.*?);/).includes('rawUrl'), '贪婪匹配了 —— 应该停在第一个分号');
+});
+
+test('微信：从 intent_uri 抠 S.rawUrl=', () => {
+    const { sandbox } = loadMain();
+    const f = sandbox.vflowExtractIntentUrl;
+    const uri = 'intent://...#Intent;scheme=weixin;S.rawUrl=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fxyz;end';
+    assertEq(f(uri, /S\.rawUrl=(.*?);/), 'https://mp.weixin.qq.com/s/xyz', '微信的 URL 抠错了');
+    // 抠不到 ⇒ 空串（不是异常、也不是原文）
+    assertEq(f(uri, /S\.url=(.*?);/), '', '微信 URI 里不该抠出 S.url=');
+    assertEq(f('', /S\.url=(.*?);/), '', '空输入应返回空串');
+    assertEq(f(null, /S\.url=(.*?);/), '', 'null 应返回空串（不能抛）');
+});
+
+test('QQ / 微信：URL 解码失败不抛（畸形转义只影响这一次）', () => {
+    const { sandbox, calls: c } = loadMain();
+    const f = sandbox.vflowExtractIntentUrl;
+    // `%zz` 是非法转义 ⇒ `decodeURIComponent` 会抛
+    const out = f('intent:...;S.url=https://a.com/100%zz;end', /S\.url=(.*?);/);
+    assertEq(out, 'https://a.com/100%zz', '解码失败时应原样返回，而不是抛 / 返回空');
+    assert(c.log.some((m) => String(m).includes('解码失败')), '解码失败应记一条日志');
+});
+
+test('附加：从 extras_json 取 url 键（解析失败 / 无键都返回空串）', () => {
+    const { sandbox, calls: c } = loadMain();
+    const f = sandbox.vflowExtractExtraUrl;
+    assertEq(f('{"url":"https://pan.baidu.com/s/1"}'), 'https://pan.baidu.com/s/1', '取 url 键失败');
+    assertEq(f('{"other":"x"}'), '', '没有 url 键应返回空串');
+    assertEq(f('not json'), '', '非法 JSON 应返回空串（不能抛）');
+    assertEq(f(''), '', '空输入应返回空串');
+    assertEq(f('null'), '', 'JSON null 应返回空串');
+    assertEq(f('{"url":123}'), '', 'url 不是字符串应返回空串');
+    assert(c.log.some((m) => String(m).includes('extras 解析失败')), '解析失败应记一条日志');
+});
+
+test('⭐ input 按标签分派：五条触发源各走各的取串方式', () => {
+    installRules();
+    // 每条路都**只命中自己那一路**，其余是 `{{{...}}}`（vFlow 的真实形态）
+    const U = (a, b) => UNRESOLVED(a, b);
+    const cases = [
+        { tag: '剪切板', expect: 'https://pan.baidu.com/s/CLIP',
+          inputs: { click_uri: U('fluid_click_broadcast', 'data_uri'),
+                    clipboard_text: 'https://pan.baidu.com/s/CLIP',
+                    qq_intent_uri: U('fluid_trigger_qq', 'intent_uri'),
+                    wechat_intent_uri: U('fluid_trigger_wechat', 'intent_uri'),
+                    extra_extras_json: U('fluid_trigger_extra', 'extras_json') } },
+        { tag: 'QQ', expect: 'https://pan.baidu.com/s/QQ',
+          inputs: { click_uri: U('fluid_click_broadcast', 'data_uri'),
+                    clipboard_text: U('fluid_trigger_clipboard', 'text_content'),
+                    qq_intent_uri: 'intent://x#Intent;S.url=https%3A%2F%2Fpan.baidu.com%2Fs%2FQQ;end',
+                    wechat_intent_uri: U('fluid_trigger_wechat', 'intent_uri'),
+                    extra_extras_json: U('fluid_trigger_extra', 'extras_json') } },
+        { tag: '微信', expect: 'https://pan.baidu.com/s/WX',
+          inputs: { click_uri: U('fluid_click_broadcast', 'data_uri'),
+                    clipboard_text: U('fluid_trigger_clipboard', 'text_content'),
+                    qq_intent_uri: U('fluid_trigger_qq', 'intent_uri'),
+                    wechat_intent_uri: 'intent://x#Intent;S.rawUrl=https%3A%2F%2Fpan.baidu.com%2Fs%2FWX;end',
+                    extra_extras_json: U('fluid_trigger_extra', 'extras_json') } },
+        { tag: '附加', expect: 'https://pan.baidu.com/s/EXTRA',
+          inputs: { click_uri: U('fluid_click_broadcast', 'data_uri'),
+                    clipboard_text: U('fluid_trigger_clipboard', 'text_content'),
+                    qq_intent_uri: U('fluid_trigger_qq', 'intent_uri'),
+                    wechat_intent_uri: U('fluid_trigger_wechat', 'intent_uri'),
+                    extra_extras_json: '{"url":"https://pan.baidu.com/s/EXTRA"}' } },
+    ];
+    for (const cs of cases) {
+        const { sandbox } = runScript(scriptText, {
+            inputs: Object.assign({ trigger_label: cs.tag }, cs.inputs),
+            vars: {},
+            __androidOpts: { browserPackage: 'com.android.chrome' }
+        });
+        assertEq(sandbox.input, cs.expect, `标签「${cs.tag}」取串不对`);
+    }
+});
+
+test('⭐ 只用剪切板的设备：其余四路恒为 `{{{...}}}` ⇒ 不误触发', () => {
+    // 这是「没配 QQ/微信/附加」时的真实形态：那几路全是未命中的字面量。
+    installRules();
+    const { sandbox } = runScript(scriptText, {
+        inputs: {
+            click_uri: UNRESOLVED('fluid_click_broadcast', 'data_uri'),
+            clipboard_text: 'https://pan.baidu.com/s/1',
+            qq_intent_uri: UNRESOLVED('fluid_trigger_qq', 'intent_uri'),
+            wechat_intent_uri: UNRESOLVED('fluid_trigger_wechat', 'intent_uri'),
+            extra_extras_json: UNRESOLVED('fluid_trigger_extra', 'extras_json'),
+            trigger_label: '剪切板'
+        },
+        vars: {},
+        __androidOpts: { browserPackage: 'com.android.chrome' }
+    });
+    assertEq(sandbox.input, 'https://pan.baidu.com/s/1', '未命中的几路污染了 input');
+    // ⚠️ 反向锁：`{{{...}}}` 绝不能被当成真值（那会拿它去识别链接 ⇒ 弹无意义的岛）
+    assert(!String(sandbox.input).includes('{{{'), 'input 里混进了未命中占位符');
+});
+
+test('QQ 标签但 intent_uri 未命中 ⇒ input 为空（不是那串 `{{{...}}}`）', () => {
+    installRules();
+    const { sandbox } = runScript(scriptText, {
+        inputs: {
+            click_uri: UNRESOLVED('fluid_click_broadcast', 'data_uri'),
+            clipboard_text: UNRESOLVED('fluid_trigger_clipboard', 'text_content'),
+            qq_intent_uri: UNRESOLVED('fluid_trigger_qq', 'intent_uri'),
+            wechat_intent_uri: UNRESOLVED('fluid_trigger_wechat', 'intent_uri'),
+            extra_extras_json: UNRESOLVED('fluid_trigger_extra', 'extras_json'),
+            trigger_label: 'QQ'
+        },
+        vars: {},
+        __androidOpts: { browserPackage: 'com.android.chrome' }
+    });
+    assertEq(sandbox.input, '', 'QQ 未命中时应是空串');
+});
+
+// ===========================================================================
+console.log('\n[12b] 更新机制（docs/UPDATE.md）');
 // ===========================================================================
 
 // ⚠️ 本节沿用 [2] 节的「产物 + 源码两路」风格。
