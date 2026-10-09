@@ -142,7 +142,7 @@ adb push version /sdcard/vFlow/fluid-cloud/version
 一句话：**导入工作流 + 跑一次即自足** ——
 工作流脚本（`src/bootstrap.js`）发现设备上缺产物，就从 GitHub 官方 raw 拉全套；
 之后**设置菜单点「检查更新」**→ 调同一个脚本里的 `vflowUpdateRun()` →
-主脚本整份覆盖 / 规则增量合并 → 提示「下次执行生效」。
+主脚本整份覆盖 / 规则增量合并 → 提示「已更新到 <版本>」+ 规则变更条数。
 
 | 文件 | 策略 | 谁写 |
 |---|---|---|
@@ -178,6 +178,6 @@ adb push version /sdcard/vFlow/fluid-cloud/version
 - ✅ **脚本更新机制已实施**（2026-10-09）：**导入工作流 + 跑一次即自足**；
   之后设置菜单点【检查更新】→ 调工作流脚本里的 `vflowUpdateRun()` →
   从 GitHub 官方 raw 拉产物 → 主脚本整份覆盖、规则/配置增量合并 →
-  提示「下次执行生效」。见 [`docs/UPDATE.md`](docs/UPDATE.md)。
+  提示「已更新到 <版本>」+ 规则变更条数。见 [`docs/UPDATE.md`](docs/UPDATE.md)。
   ⚠️ 真机验证状态见该文档 §10（其中 `renameTo` 原子性、HTTP 桥接、
   `eval` 后主脚本能否看到 bootstrap 的全局 —— 三项**必须在真机上确认**）

@@ -164,6 +164,51 @@ function vflowUpdateValidateVersion(text) {
 }
 
 /**
+ * 合并的「变更统计」（纯函数，离线可测）—— 给提示用。
+ *
+ * 上游也报这个（`reference/update.js:632`「成功更新链接分发规则共 N 个」），
+ * 但它是**按条逐条拉**，所以天然知道「成功几条」。我们是**整份拉 + 本地合并**
+ * ⇒ 只能靠比对两边算出来。
+ *
+ * @returns {{added:number, updated:number, kept:number, total:number}}
+ *   added   = 远端有、本地没有（**新增**）
+ *   updated = 两边都有，但**内容不同**（远端覆盖了本地）
+ *   kept    = 两边都有且**内容相同**（本次没变）
+ *   total   = 合并后的总条数
+ */
+function vflowUpdateRulesStats(localArr, remoteArr) {
+    var local = Array.isArray(localArr) ? localArr : [];
+    var remote = Array.isArray(remoteArr) ? remoteArr : [];
+
+    var byName = {};
+    for (var i = 0; i < local.length; i++) {
+        var n = local[i] && local[i].name;
+        if (typeof n === "string") byName[n] = local[i];
+    }
+
+    var added = 0, updated = 0, kept = 0;
+    for (var j = 0; j < remote.length; j++) {
+        var rn = remote[j] && remote[j].name;
+        if (typeof rn !== "string" || !Object.prototype.hasOwnProperty.call(byName, rn)) {
+            added++;
+            continue;
+        }
+        // ⚠️ 逐字节比（`JSON.stringify` 的键序取决于**对象里键的定义顺序**，
+        //    而两份都是同一套解析路径来的 ⇒ 可比。若哪天不一致，代价只是
+        //    「本来没变也算成变了」—— 提示偏保守，不影响功能）。
+        if (JSON.stringify(byName[rn]) === JSON.stringify(remote[j])) kept++;
+        else updated++;
+    }
+
+    return {
+        added: added,
+        updated: updated,
+        kept: kept,
+        total: vflowUpdateMergeRules(local, remote).length
+    };
+}
+
+/**
  * 规则库增量合并（**按 name**，UPDATE.md §5.2）。
  *
  * 顺序（照上游 `reference/update.js:503-572` 的语义，必须确定 ——
@@ -294,20 +339,23 @@ function vflowUpdateFail(msg) {
 
 /**
  * 同步一份规则库：拉 → 校验 → 与本地按 name 合并 → 原子写。
- * @returns {string} "" = 成功；否则是错误说明（供调用方汇总成一条提示）
+ *
+ * @returns {{error:string, stats:object|null}} error 为空 = 成功
  */
 function vflowUpdateSyncRulesFile(url, fileName, label) {
+    function fail(msg) { return { error: msg, stats: null }; }
+
     var r = vflowUpdateHttpGet(url);
-    if (!r.ok) return label + "拉取失败（" + r.error + "）";
+    if (!r.ok) return fail(label + "拉取失败（" + r.error + "）");
 
     var verr = vflowUpdateValidateRulesJson(r.body, label);
-    if (verr !== null) return verr;
+    if (verr !== null) return fail(verr);
 
     var remoteArr;
     try {
         remoteArr = JSON.parse(r.body);
     } catch (e) {
-        return label + "解析失败：" + e;
+        return fail(label + "解析失败：" + e);
     }
 
     var localText = vflowUpdateReadLocal(VFLOW_CLOUD_DIR + "/" + fileName);
@@ -327,8 +375,21 @@ function vflowUpdateSyncRulesFile(url, fileName, label) {
     var w = vflowUpdateAtomicWrite(VFLOW_CLOUD_DIR + "/" + fileName, JSON.stringify(merged, null, 2), function (t) {
         return vflowUpdateValidateRulesJson(t, label);
     });
-    if (w !== null) return label + "写入失败（" + w + "）";
-    return "";
+    if (w !== null) return fail(label + "写入失败（" + w + "）");
+    return { error: "", stats: vflowUpdateRulesStats(localArr, remoteArr) };
+}
+
+/**
+ * 把一份规则库的变更统计拼成一小段中文（给成功提示用）。
+ * 例：`规则 +3 ~1`（新增 3、更新 1）；没变时返回 `""`。
+ */
+function vflowUpdateStatsText(label, stats) {
+    if (!stats) return "";
+    if (stats.added === 0 && stats.updated === 0) return label + " 无变化";
+    var parts = [];
+    if (stats.added > 0) parts.push("+" + stats.added);
+    if (stats.updated > 0) parts.push("~" + stats.updated);
+    return label + " " + parts.join(" ");
 }
 
 /**
@@ -387,13 +448,12 @@ function vflowUpdateRun() {
     }
 
     // 5/6. 规则两份（逐份独立；失败不中断、不回滚）
-    var rulesErr = vflowUpdateSyncRulesFile(VFLOW_UPDATE_URLS.rules, "rules.json", "rules.json");
-    var nolinkErr = vflowUpdateSyncRulesFile(VFLOW_UPDATE_URLS.nolinkrules, "nolinkrules.json", "nolinkrules.json");
+    var rulesRes = vflowUpdateSyncRulesFile(VFLOW_UPDATE_URLS.rules, "rules.json", "规则");
+    var nolinkRes = vflowUpdateSyncRulesFile(VFLOW_UPDATE_URLS.nolinkrules, "nolinkrules.json", "无链接规则");
 
-    var from = localVer === "" ? "（无）" : localVer;
     var failed = [];
-    if (rulesErr !== "") failed.push(rulesErr);
-    if (nolinkErr !== "") failed.push(nolinkErr);
+    if (rulesRes.error !== "") failed.push(rulesRes.error);
+    if (nolinkRes.error !== "") failed.push(nolinkRes.error);
 
     // ⚠️⚠️ 规则有失败 ⇒ **不写 version**（UPDATE.md §4.2）：version 是「本次完整成功」
     //    的标志，不写 ⇒ 下次点更新仍走完整流程 ⇒ **幂等**。
@@ -412,9 +472,14 @@ function vflowUpdateRun() {
         vflowUpdateFail("更新完成但版本号没写上（" + vw + "），下次会重来");
         return;
     }
-    // ⚠️ 「下次执行生效」必须打：主脚本已经被 eval 进内存了
-    //    ⇒ 覆盖文件**不影响本次执行**。不说清楚用户会以为「点了更新没生效」。
-    vflowUpdateInfo("更新完成（" + from + " → " + remoteVer + "），下次执行生效");
+    // 提示 = 版本号 + 规则变更统计（用户 2026-10-09 定：**不提「下次执行生效」**，
+    // 只报版本号；变更统计对齐上游 reference/update.js:632「成功更新…共 N 个」）。
+    var lines = ["已更新到 " + remoteVer];
+    var rText = vflowUpdateStatsText("规则", rulesRes.stats);
+    var nText = vflowUpdateStatsText("无链接规则", nolinkRes.stats);
+    if (rText !== "") lines.push(rText);
+    if (nText !== "") lines.push(nText);
+    vflowUpdateInfo(lines.join("\n"));
 }
 
 // ---------------------------------------------------------------------------

@@ -1247,7 +1247,7 @@ test('原子写：renameTo 返回 false ⇒ 目标不被改动（不做「先删
     assert(!fs.existsSync(target + '.tmp'), 'renameTo 失败应清掉 .tmp');
 });
 
-test('主流程成功：三份产物被覆盖/合并，version 最后写，提示含「下次执行生效」', () => {
+test('主流程成功：三份产物被覆盖/合并，version 最后写，提示报版本号 + 规则条数', () => {
     const { sandbox, context, calls: c } = loadMain();
     loadUpdate(context);
 
@@ -1280,9 +1280,35 @@ test('主流程成功：三份产物被覆盖/合并，version 最后写，提�
     assertEq(mergedNoLink.map((x) => x.name), ['官方无链接']);
     // version 被写（内容 = 远端原样）
     assertEq(fs.readFileSync(path.join(CLOUD_DIR, 'version'), 'utf8'), '0.3.0');
-    // 成功提示必须含「下次执行生效」（bootstrap 已把脚本 eval 进内存）
-    assert(c.toast.some((t) => String(t).includes('下次执行生效')), `成功提示不对：${JSON.stringify(c.toast)}`);
-    assert(c.toast.some((t) => String(t).includes('0.2.0 → 0.3.0')), '提示里应有「旧 → 新」');
+    // 成功提示 = 版本号 + 规则变更统计（用户 2026-10-09 定：不提「下次执行生效」）
+    const ok = c.toast.find((t) => String(t).includes('已更新到'));
+    assert(ok, `成功提示不对：${JSON.stringify(c.toast)}`);
+    assert(String(ok).includes('0.3.0'), `提示里应有版本号：${ok}`);
+    assert(!String(ok).includes('下次执行生效'), `提示里不该再提「下次执行生效」：${ok}`);
+    assert(String(ok).includes('规则 +2'), `提示里应有规则新增条数（本地独有不算新增）：${ok}`);
+    assert(String(ok).includes('无链接规则 +1'), `提示里应有无链接规则的统计：${ok}`);
+});
+
+test('规则变更统计：新增 / 更新 / 没变 / 总数（纯函数）', () => {
+    const { sandbox, context } = loadMain();
+    loadUpdate(context);
+    const stats = sandbox.vflowUpdateRulesStats;
+    const local = [{ name: 'a', tigger: ['1'] }, { name: 'b', tigger: ['2'] }, { name: '本地独有' }];
+    const remote = [
+        { name: 'a', tigger: ['1'] },      // 没变
+        { name: 'b', tigger: ['2', '3'] }, // 变了（远端覆盖）
+        { name: 'c', tigger: ['9'] }       // 新增
+    ];
+    const s = stats(local, remote);
+    assertEq(s.kept, 1, '没变的条数不对');
+    assertEq(s.updated, 1, '更新的条数不对');
+    assertEq(s.added, 1, '新增的条数不对');
+    assertEq(s.total, 4, '总数不对（本地独有 1 + 远端 3）');
+    // 提示文案
+    assertEq(sandbox.vflowUpdateStatsText('规则', s), '规则 +1 ~1', '统计文案不对');
+    assertEq(sandbox.vflowUpdateStatsText('规则', stats([], [])), '规则 无变化', '没变时的文案不对');
+    // 空/非数组入参不崩
+    assertEq(stats(null, undefined).total, 0);
 });
 
 test('⭐ 拉主脚本失败 ⇒ 后续两份都不拉（避免「新规则 + 旧脚本」）', () => {
